@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtGui import QColor, QPalette
 
 
@@ -15,6 +15,15 @@ from styles import APP_STYLE
 
 
 def main() -> int:
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+    if hasattr(QtCore.Qt, "HighDpiScaleFactorRoundingPolicy") and hasattr(
+        QtWidgets.QApplication, "setHighDpiScaleFactorRoundingPolicy"
+    ):
+        QtWidgets.QApplication.setHighDpiScaleFactorRoundingPolicy(
+            QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("PR788 UI")
     app.setStyle("Fusion")

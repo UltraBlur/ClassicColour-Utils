@@ -39,8 +39,8 @@ class MetricCard(QtWidgets.QFrame):
         self.setProperty("card", True)
         self.setProperty("metric", True)
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 16)
-        layout.setSpacing(6)
+        layout.setContentsMargins(9, 8, 9, 8)
+        layout.setSpacing(5)
 
         self.title_label = QtWidgets.QLabel(title)
         self.title_label.setProperty("metricTitle", True)
@@ -60,28 +60,28 @@ class ColorSwatchWidget(QtWidgets.QFrame):
         super().__init__(parent)
         self.setProperty("card", True)
         self.setProperty("metric", True)
-        self.setFixedWidth(148)
+        self.setFixedWidth(100)
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
 
         self.title_label = QtWidgets.QLabel("sRGB Preview")
         self.title_label.setProperty("metricTitle", True)
         self.title_label.setProperty("swatchLabel", True)
-        self.title_label.setFixedWidth(78)
+        self.title_label.setFixedWidth(62)
         self.title_label.setAlignment(QtCore.Qt.AlignCenter)
 
         self.swatch = QtWidgets.QFrame()
-        self.swatch.setMinimumSize(116, 84)
-        self.swatch.setMaximumHeight(92)
+        self.swatch.setMinimumSize(78, 52)
+        self.swatch.setMaximumHeight(58)
         self.swatch.setStyleSheet(
-            "background-color: rgb(127, 127, 127); border: 1px solid rgb(67, 71, 77); border-radius: 12px;"
+            "background-color: rgb(127, 127, 127); border: 1px solid rgb(67, 71, 77); border-radius: 6px;"
         )
 
         self.value_label = QtWidgets.QLabel("RGB 127, 127, 127")
         self.value_label.setProperty("metricTitle", True)
         self.value_label.setProperty("swatchLabel", True)
-        self.value_label.setFixedWidth(104)
+        self.value_label.setFixedWidth(80)
         self.value_label.setAlignment(QtCore.Qt.AlignCenter)
 
         layout.addWidget(self.title_label, 0, QtCore.Qt.AlignHCenter)
@@ -92,7 +92,7 @@ class ColorSwatchWidget(QtWidgets.QFrame):
     def set_color(self, rgb: tuple[int, int, int]) -> None:
         r, g, b = rgb
         self.swatch.setStyleSheet(
-            f"background-color: rgb({r}, {g}, {b}); border: 1px solid rgb(67, 71, 77); border-radius: 12px;"
+            f"background-color: rgb({r}, {g}, {b}); border: 1px solid rgb(67, 71, 77); border-radius: 6px;"
         )
         self.value_label.setText(f"RGB {r}, {g}, {b}")
 
@@ -102,7 +102,7 @@ class SPDPlotWidget(QtWidgets.QFrame):
         super().__init__(parent)
         self.setProperty("card", True)
         self.setProperty("plot", True)
-        self.setMinimumHeight(360)
+        self.setMinimumHeight(230)
         self._rows = []
         self._curve_color = QtGui.QColor(255, 255, 255)
         self._peak_color = QtGui.QColor(255, 194, 82)
@@ -302,7 +302,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("PR788 Spectral Capture")
-        self.resize(1680, 920)
 
         self.pr788: Optional[PR788] = None
         self._task_thread: Optional[QtCore.QThread] = None
@@ -313,6 +312,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_preview_path: Optional[str] = None
 
         self._build_ui()
+        self._resize_for_screen()
         self._load_settings()
         self.refresh_ports()
         self.update_counter_state()
@@ -325,8 +325,8 @@ class MainWindow(QtWidgets.QMainWindow):
         central.setProperty("surface", True)
         self.setCentralWidget(central)
         root = QtWidgets.QHBoxLayout(central)
-        root.setContentsMargins(28, 28, 28, 28)
-        root.setSpacing(22)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(14)
 
         control_panel = self._build_control_panel()
         preview_panel = self._build_preview_panel()
@@ -336,14 +336,27 @@ class MainWindow(QtWidgets.QMainWindow):
         root.addWidget(preview_panel, 1)
         root.addWidget(history_panel, 0)
 
+    def _resize_for_screen(self) -> None:
+        screen = QtWidgets.QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1680, 920)
+            return
+
+        available = screen.availableGeometry()
+        width = min(1680, int(available.width() * 0.92))
+        height = min(920, int(available.height() * 0.9))
+        self.resize(width, height)
+
     def _build_control_panel(self) -> QtWidgets.QWidget:
         frame = QtWidgets.QFrame()
         frame.setProperty("card", True)
         frame.setProperty("sidebar", True)
-        frame.setFixedWidth(500)
+        frame.setMinimumWidth(300)
+        frame.setMaximumWidth(400)
+        frame.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         layout = QtWidgets.QVBoxLayout(frame)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(18)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
 
         title = QtWidgets.QLabel("Capture Console")
         title.setProperty("title", True)
@@ -364,8 +377,8 @@ class MainWindow(QtWidgets.QMainWindow):
         box = QtWidgets.QFrame()
         box.setProperty("card", True)
         layout = QtWidgets.QVBoxLayout(box)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
+        layout.setContentsMargins(9, 9, 9, 9)
+        layout.setSpacing(9)
 
         label = QtWidgets.QLabel("Connection")
         label.setProperty("section", True)
@@ -382,8 +395,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         status_row = QtWidgets.QHBoxLayout()
         self.status_dot = QtWidgets.QLabel()
-        self.status_dot.setFixedSize(14, 14)
-        self.status_dot.setStyleSheet("border-radius: 7px; background: #8a5d3b;")
+        self.status_dot.setFixedSize(8, 8)
+        self.status_dot.setStyleSheet("border-radius: 4px; background: #8a5d3b;")
         self.status_label = QtWidgets.QLabel("Disconnected")
         self.status_label.setProperty("status", "disconnected")
         self.status_label.setProperty("chip", True)
@@ -415,8 +428,8 @@ class MainWindow(QtWidgets.QMainWindow):
         box = QtWidgets.QFrame()
         box.setProperty("card", True)
         layout = QtWidgets.QVBoxLayout(box)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
+        layout.setContentsMargins(9, 9, 9, 9)
+        layout.setSpacing(9)
 
         title = QtWidgets.QLabel("Output And Naming")
         title.setProperty("section", True)
@@ -447,8 +460,8 @@ class MainWindow(QtWidgets.QMainWindow):
         template_hint.setProperty("muted", True)
 
         token_wrap = QtWidgets.QGridLayout()
-        token_wrap.setHorizontalSpacing(8)
-        token_wrap.setVerticalSpacing(8)
+        token_wrap.setHorizontalSpacing(4)
+        token_wrap.setVerticalSpacing(7)
         tokens = [
             ("+counter", "{counter}"),
             ("+timestamp", "{timestamp}"),
@@ -482,8 +495,8 @@ class MainWindow(QtWidgets.QMainWindow):
         box = QtWidgets.QFrame()
         box.setProperty("card", True)
         layout = QtWidgets.QVBoxLayout(box)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
+        layout.setContentsMargins(9, 9, 9, 9)
+        layout.setSpacing(9)
 
         title = QtWidgets.QLabel("Auto Counter")
         title.setProperty("section", True)
@@ -494,7 +507,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.counter_enabled_check.toggled.connect(self.update_filename_preview)
 
         start_row = QtWidgets.QHBoxLayout()
-        start_row.setSpacing(10)
+        start_row.setSpacing(8)
         self.counter_start_spin = QtWidgets.QSpinBox()
         self.counter_start_spin.setRange(0, 100000000)
         self.counter_start_spin.valueChanged.connect(self.handle_counter_start_changed)
@@ -509,7 +522,7 @@ class MainWindow(QtWidgets.QMainWindow):
         start_row.addWidget(self.step_spin)
 
         current_row = QtWidgets.QHBoxLayout()
-        current_row.setSpacing(10)
+        current_row.setSpacing(8)
         self.current_counter_spin = QtWidgets.QSpinBox()
         self.current_counter_spin.setRange(0, 100000000)
         self.current_counter_spin.valueChanged.connect(self.handle_current_counter_changed)
@@ -536,8 +549,8 @@ class MainWindow(QtWidgets.QMainWindow):
         box = QtWidgets.QFrame()
         box.setProperty("card", True)
         layout = QtWidgets.QVBoxLayout(box)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
+        layout.setContentsMargins(9, 9, 9, 9)
+        layout.setSpacing(9)
 
         title = QtWidgets.QLabel("Measurement")
         title.setProperty("section", True)
@@ -546,7 +559,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.measure_button = QtWidgets.QPushButton("Capture Measurement")
         self.measure_button.setProperty("primaryAction", True)
         self.measure_button.clicked.connect(self.handle_measure)
-        self.measure_button.setMinimumHeight(54)
+        self.measure_button.setMinimumHeight(32)
         layout.addWidget(self.measure_button)
         return box
 
@@ -554,9 +567,11 @@ class MainWindow(QtWidgets.QMainWindow):
         frame = QtWidgets.QFrame()
         frame.setProperty("card", True)
         frame.setProperty("mainpanel", True)
+        frame.setMinimumWidth(380)
+        frame.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         layout = QtWidgets.QVBoxLayout(frame)
-        layout.setContentsMargins(26, 26, 26, 26)
-        layout.setSpacing(18)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
 
         title = QtWidgets.QLabel("Measurement Snapshot")
         title.setProperty("title", True)
@@ -567,12 +582,12 @@ class MainWindow(QtWidgets.QMainWindow):
         summary.setProperty("card", True)
         summary.setProperty("hero", True)
         summary_layout = QtWidgets.QHBoxLayout(summary)
-        summary_layout.setContentsMargins(20, 20, 20, 20)
-        summary_layout.setSpacing(14)
+        summary_layout.setContentsMargins(10, 10, 10, 10)
+        summary_layout.setSpacing(10)
 
         summary_text_layout = QtWidgets.QVBoxLayout()
         summary_text_layout.setContentsMargins(0, 0, 0, 0)
-        summary_text_layout.setSpacing(8)
+        summary_text_layout.setSpacing(7)
         self.saved_name_label = QtWidgets.QLabel("File: --")
         self.saved_name_label.setProperty("savedName", True)
         self.saved_path_label = QtWidgets.QLabel("Path: --")
@@ -583,14 +598,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.spd_plot = SPDPlotWidget()
         self.color_swatch = ColorSwatchWidget()
-        self.color_swatch.setFixedWidth(138)
+        self.color_swatch.setFixedWidth(96)
 
         summary_layout.addLayout(summary_text_layout, 1)
         summary_layout.addWidget(self.color_swatch, 0, QtCore.Qt.AlignTop)
 
         cards_grid = QtWidgets.QGridLayout()
-        cards_grid.setHorizontalSpacing(12)
-        cards_grid.setVerticalSpacing(12)
+        cards_grid.setHorizontalSpacing(6)
+        cards_grid.setVerticalSpacing(10)
         self.metric_cards = {
             "xy": MetricCard("CIE 1931 x y"),
             "xyz": MetricCard("CIE XYZ"),
@@ -629,16 +644,18 @@ class MainWindow(QtWidgets.QMainWindow):
         frame = QtWidgets.QFrame()
         frame.setProperty("card", True)
         frame.setProperty("mainpanel", True)
-        frame.setFixedWidth(360)
+        frame.setMinimumWidth(210)
+        frame.setMaximumWidth(290)
+        frame.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         layout = QtWidgets.QVBoxLayout(frame)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(9)
 
         history_label = QtWidgets.QLabel("History Measurements")
         history_label.setProperty("title", True)
 
         button_row = QtWidgets.QHBoxLayout()
-        button_row.setSpacing(8)
+        button_row.setSpacing(7)
         self.history_refresh_button = QtWidgets.QPushButton("Refresh")
         self.history_refresh_button.setProperty("secondary", True)
         self.history_refresh_button.clicked.connect(self.refresh_history_list)
@@ -650,7 +667,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.history_list = QtWidgets.QListWidget()
         self.history_list.setProperty("historyList", True)
-        self.history_list.setMinimumHeight(180)
+        self.history_list.setMinimumHeight(110)
         self.history_list.itemActivated.connect(self.handle_history_item_activated)
         self.history_list.itemClicked.connect(self.handle_history_item_activated)
 
@@ -1002,7 +1019,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label.setProperty("status", state)
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
-        self.status_dot.setStyleSheet(f"border-radius: 7px; background: {color};")
+        self.status_dot.setStyleSheet(f"border-radius: 4px; background: {color};")
 
     def append_log(self, message: str) -> None:
         timestamp = QtCore.QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
