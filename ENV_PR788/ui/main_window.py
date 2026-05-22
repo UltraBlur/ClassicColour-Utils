@@ -363,6 +363,10 @@ class MainWindow(QtWidgets.QMainWindow):
         subtitle = QtWidgets.QLabel("Serial control, file naming, and one-tap acquisition for field use.")
         subtitle.setProperty("muted", True)
         subtitle.setWordWrap(True)
+        attribution = QtWidgets.QLabel("Developed by 北京电影学院智能影像工程学院")
+        attribution.setProperty("attribution", True)
+        attribution.setWordWrap(True)
+        attribution.setAlignment(QtCore.Qt.AlignCenter)
 
         layout.addWidget(title)
         layout.addWidget(subtitle)
@@ -371,6 +375,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self._build_counter_section())
         layout.addWidget(self._build_action_section())
         layout.addStretch(1)
+        layout.addWidget(attribution)
         return frame
 
     def _build_serial_section(self) -> QtWidgets.QWidget:

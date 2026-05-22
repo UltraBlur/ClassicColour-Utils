@@ -70,6 +70,12 @@ QLabel[muted="true"] {
     color: rgb(210, 210, 210);
 }
 
+QLabel[attribution="true"] {
+    color: rgb(185, 185, 185);
+    font-size: 10px;
+    font-weight: 500;
+}
+
 QLabel[chip="true"] {
     background: rgb(31, 31, 31);
     border: 1px solid rgb(67, 71, 77);
