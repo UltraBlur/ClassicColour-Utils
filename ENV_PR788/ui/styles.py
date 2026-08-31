@@ -7,7 +7,7 @@ QWidget {
     background: rgb(40, 40, 46);
     color: rgb(235, 235, 235);
     font-family: "Open Sans", "Microsoft YaHei UI";
-    font-size: 11px;
+    font-size: 10px;
 }
 
 QMainWindow {
@@ -17,7 +17,7 @@ QMainWindow {
 QFrame[card="true"] {
     background: rgb(40, 40, 46);
     border: 1px solid rgb(60, 60, 66);
-    border-radius: 8px;
+    border-radius: 6px;
 }
 
 QFrame[sidebar="true"] {
@@ -33,29 +33,29 @@ QFrame[mainpanel="true"] {
 QFrame[hero="true"] {
     background: rgb(33, 33, 38);
     border: 1px solid rgb(7, 7, 7);
-    border-radius: 8px;
+    border-radius: 6px;
 }
 
 QFrame[metric="true"] {
     background: rgb(33, 33, 38);
     border: 1px solid rgb(67, 71, 77);
-    border-radius: 8px;
+    border-radius: 6px;
 }
 
 QFrame[plot="true"] {
     background: rgb(33, 33, 38);
     border: 1px solid rgb(67, 71, 77);
-    border-radius: 8px;
+    border-radius: 6px;
 }
 
 QLabel[title="true"] {
-    font-size: 15px;
+    font-size: 13px;
     font-weight: 500;
     color: rgb(255, 255, 255);
 }
 
 QLabel[section="true"] {
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 600;
     color: rgb(232, 232, 232);
 }
@@ -72,7 +72,7 @@ QLabel[muted="true"] {
 
 QLabel[attribution="true"] {
     color: rgb(185, 185, 185);
-    font-size: 10px;
+    font-size: 9px;
     font-weight: 500;
 }
 
@@ -80,7 +80,7 @@ QLabel[chip="true"] {
     background: rgb(31, 31, 31);
     border: 1px solid rgb(67, 71, 77);
     border-radius: 999px;
-    padding: 3px 7px;
+    padding: 2px 6px;
 }
 
 QLabel[status="connected"] {
@@ -115,23 +115,23 @@ QLabel[swatchLabel="true"] {
 
 QLabel[metricValue="true"] {
     color: rgb(255, 255, 255);
-    font-size: 15px;
+    font-size: 13px;
     font-weight: 400;
 }
 
 QLabel[previewName="true"] {
     background: rgb(31, 31, 31);
     border: 1px solid rgb(67, 71, 77);
-    border-radius: 7px;
-    padding: 8px 9px;
+    border-radius: 6px;
+    padding: 6px 8px;
     color: rgb(255, 255, 255);
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 700;
 }
 
 QLabel[savedName="true"] {
     color: rgb(255, 255, 255);
-    font-size: 13px;
+    font-size: 11px;
     font-weight: 700;
 }
 
@@ -139,9 +139,9 @@ QPushButton {
     background-color: rgb(40, 40, 46);
     color: rgb(240, 240, 240);
     border: 1px solid rgb(100, 100, 100);
-    border-radius: 8px;
-    padding: 5px 10px;
-    min-height: 20px;
+    border-radius: 6px;
+    padding: 4px 9px;
+    min-height: 18px;
     font-weight: 600;
 }
 
@@ -157,8 +157,8 @@ QPushButton[primaryAction="true"] {
     background-color: rgb(100, 150, 200);
     color: rgb(255, 255, 255);
     border: 1px solid rgb(100, 150, 200);
-    font-size: 12px;
-    padding: 7px 11px;
+    font-size: 11px;
+    padding: 5px 10px;
 }
 
 QPushButton[primaryAction="true"]:hover {
@@ -189,8 +189,8 @@ QPushButton[token="true"] {
     background-color: rgb(31, 31, 31);
     color: rgb(238, 238, 238);
     border: 1px solid rgb(67, 71, 77);
-    border-radius: 8px;
-    padding: 5px 8px;
+    border-radius: 6px;
+    padding: 4px 7px;
 }
 
 QPushButton[token="true"]:hover {
@@ -202,8 +202,8 @@ QLineEdit, QComboBox, QTextEdit, QSpinBox {
     color: rgb(240, 240, 240);
     border: 1px solid rgb(7, 7, 7);
     border-radius: 5px;
-    padding: 5px 7px;
-    min-height: 20px;
+    padding: 4px 7px;
+    min-height: 18px;
     selection-background-color: rgb(100, 200, 255);
 }
 
@@ -228,7 +228,7 @@ QComboBox QAbstractItemView {
 
 QCheckBox {
     spacing: 5px;
-    font-size: 11px;
+    font-size: 10px;
 }
 
 QCheckBox::indicator {
@@ -246,22 +246,22 @@ QCheckBox::indicator:checked {
 QTextEdit[console="true"] {
     background: rgb(31, 31, 31);
     border: 1px solid rgb(7, 7, 7);
-    border-radius: 7px;
-    padding: 9px;
+    border-radius: 6px;
+    padding: 8px;
     color: rgb(235, 235, 235);
 }
 
 QListWidget[historyList="true"] {
     background: rgb(31, 31, 31);
     border: 1px solid rgb(7, 7, 7);
-    border-radius: 7px;
+    border-radius: 6px;
     padding: 4px;
     color: rgb(235, 235, 235);
     outline: none;
 }
 
 QListWidget[historyList="true"]::item {
-    padding: 5px 6px;
+    padding: 4px 6px;
     margin: 0px;
     border-radius: 4px;
 }
@@ -273,5 +273,103 @@ QListWidget[historyList="true"]::item:selected {
 
 QListWidget[historyList="true"]::item:hover {
     background: rgb(45, 45, 50);
+}
+
+QTreeWidget[historyList="true"] {
+    background: rgb(31, 31, 31);
+    border: 1px solid rgb(7, 7, 7);
+    border-radius: 6px;
+    padding: 4px;
+    color: rgb(235, 235, 235);
+    outline: none;
+}
+
+QTreeWidget[historyList="true"]::item {
+    padding: 4px 6px;
+    margin: 0px;
+    border-radius: 4px;
+}
+
+QTreeWidget[historyList="true"]::item:selected {
+    background: rgb(100, 150, 200);
+    color: rgb(255, 255, 255);
+}
+
+QTreeWidget[historyList="true"]::item:hover {
+    background: rgb(45, 45, 50);
+}
+
+QFrame[metric="true"][compact="true"] {
+    border-radius: 5px;
+}
+
+QLabel[metricTitle="true"][compact="true"] {
+    font-size: 8px;
+}
+
+QLabel[metricValue="true"][compact="true"] {
+    font-size: 11px;
+}
+
+QComboBox[small="true"] {
+    font-size: 10px;
+    padding: 2px 6px;
+    min-height: 16px;
+}
+
+QComboBox[small="true"]::drop-down {
+    width: 14px;
+}
+
+QSplitter::handle {
+    background: rgb(40, 40, 46);
+}
+
+QSplitter::handle:horizontal {
+    width: 4px;
+}
+
+QSplitter::handle:vertical {
+    height: 4px;
+}
+
+QSplitter::handle:hover {
+    background: rgb(100, 150, 200);
+}
+
+QDialog {
+    background-color: rgb(40, 40, 46);
+}
+
+QTableWidget {
+    background-color: rgb(31, 31, 31);
+    color: rgb(235, 235, 235);
+    border: 1px solid rgb(67, 71, 77);
+    border-radius: 6px;
+    gridline-color: rgb(55, 58, 64);
+    alternate-background-color: rgb(35, 35, 40);
+}
+
+QHeaderView::section {
+    background-color: rgb(38, 38, 44);
+    color: rgb(220, 220, 225);
+    border: none;
+    border-bottom: 1px solid rgb(67, 71, 77);
+    padding: 4px 6px;
+    font-weight: 600;
+}
+
+QTableCornerButton::section {
+    background-color: rgb(38, 38, 44);
+    border: none;
+}
+
+QTableWidget::item {
+    padding: 2px 6px;
+}
+
+QTableWidget::item:selected {
+    background-color: rgb(100, 150, 200);
+    color: rgb(255, 255, 255);
 }
 """

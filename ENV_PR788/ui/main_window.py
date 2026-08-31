@@ -1,9 +1,21 @@
+import subprocess
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Dict, List, Optional
 
+import colour
+import numpy as np
+from colour.plotting import lines_spectral_locus
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+from analysis_dialogs import (
+    CRIDialog,
+    GamutDialog,
+    SPDComparisonDialog,
+    SpectralRatioDialog,
+)
+from chromaticity_field import chromaticity_image
 from core.PR788_Service import (
+    HistoryCsvItem,
     MeasurementRecord,
     build_template_variables,
     load_preview_from_csv,
@@ -11,8 +23,65 @@ from core.PR788_Service import (
     list_history_csv_files,
     measure_with_template,
     render_filename_template,
+    sanitize_filename_part,
 )
 from core.PR788_Utils import PR788
+
+
+CMFS_NAME = "CIE 1931 2 Degree Standard Observer"
+
+# folder names never shown in the project file tree (besides dot-folders)
+NOISY_DIR_NAMES = frozenset({"__pycache__", "node_modules"})
+
+CHROMATICITY_SYSTEMS = {
+    "CIE 1931 xy": {
+        "locus_method": "CIE 1931",
+        "x_range": (0.0, 0.80),
+        "y_range": (0.0, 0.85),
+        "x_label": "x",
+        "y_label": "y",
+        "ticks": [0.2, 0.4, 0.6, 0.8],
+    },
+    "CIE 1976 u'v'": {
+        "locus_method": "CIE 1976 UCS",
+        "x_range": (0.0, 0.65),
+        "y_range": (0.0, 0.62),
+        "x_label": "u'",
+        "y_label": "v'",
+        "ticks": [0.2, 0.4, 0.6],
+    },
+}
+
+# Wavelengths covered by lines_spectral_locus positions (1 nm steps);
+# index = wavelength - 360, so the line of purples spans 380 nm -> 780 nm.
+_LOCUS_START_WAVELENGTH = 360
+_PURPLE_LINE_WAVELENGTHS = (380, 780)
+
+_chromaticity_cache: dict[str, dict] = {}
+
+
+def _get_chromaticity_data(method: str) -> dict:
+    if method in _chromaticity_cache:
+        return _chromaticity_cache[method]
+
+    lines, _ = lines_spectral_locus(method=method)
+    positions = np.asarray(lines["position"], dtype=float)
+
+    # D65 white point, transformed into the same chromaticity space.
+    # CIE 1976 is converted directly (this colour version's XYZ_to_UVW does
+    # not yield u'v): u' = 4X/(X+15Y+3Z), v' = 9Y/(X+15Y+3Z) -> (0.1978, 0.4683).
+    d65_xyz = np.asarray(
+        colour.sd_to_XYZ(colour.SDS_ILLUMINANTS["D65"], colour.MSDS_CMFS[CMFS_NAME]), dtype=float
+    )
+    if method == "CIE 1931":
+        d65_point = np.asarray(colour.XYZ_to_xy(d65_xyz), dtype=float)
+    else:
+        denom = d65_xyz[0] + 15.0 * d65_xyz[1] + 3.0 * d65_xyz[2]
+        d65_point = np.array([4.0 * d65_xyz[0] / denom, 9.0 * d65_xyz[1] / denom])
+
+    data = {"positions": positions, "d65": d65_point}
+    _chromaticity_cache[method] = data
+    return data
 
 
 class TaskWorker(QtCore.QObject):
@@ -34,18 +103,32 @@ class TaskWorker(QtCore.QObject):
 
 
 class MetricCard(QtWidgets.QFrame):
-    def __init__(self, title: str, value: str = "--", parent: Optional[QtWidgets.QWidget] = None) -> None:
+    def __init__(
+        self,
+        title: str,
+        value: str = "--",
+        compact: bool = False,
+        parent: Optional[QtWidgets.QWidget] = None,
+    ) -> None:
         super().__init__(parent)
         self.setProperty("card", True)
         self.setProperty("metric", True)
+        if compact:
+            self.setProperty("compact", True)
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(9, 8, 9, 8)
-        layout.setSpacing(5)
+        if compact:
+            layout.setContentsMargins(7, 4, 7, 4)
+            layout.setSpacing(2)
+        else:
+            layout.setContentsMargins(8, 7, 8, 7)
+            layout.setSpacing(4)
 
         self.title_label = QtWidgets.QLabel(title)
         self.title_label.setProperty("metricTitle", True)
         self.value_label = QtWidgets.QLabel(value)
         self.value_label.setProperty("metricValue", True)
+        if compact:
+            self.value_label.setProperty("compact", True)
         self.value_label.setWordWrap(True)
 
         layout.addWidget(self.title_label)
@@ -60,20 +143,20 @@ class ColorSwatchWidget(QtWidgets.QFrame):
         super().__init__(parent)
         self.setProperty("card", True)
         self.setProperty("metric", True)
-        self.setFixedWidth(100)
+        self.setFixedWidth(92)
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setContentsMargins(6, 5, 6, 5)
         layout.setSpacing(4)
 
         self.title_label = QtWidgets.QLabel("sRGB Preview")
         self.title_label.setProperty("metricTitle", True)
         self.title_label.setProperty("swatchLabel", True)
-        self.title_label.setFixedWidth(62)
+        self.title_label.setFixedWidth(58)
         self.title_label.setAlignment(QtCore.Qt.AlignCenter)
 
         self.swatch = QtWidgets.QFrame()
-        self.swatch.setMinimumSize(78, 52)
-        self.swatch.setMaximumHeight(58)
+        self.swatch.setMinimumSize(72, 46)
+        self.swatch.setMaximumHeight(50)
         self.swatch.setStyleSheet(
             "background-color: rgb(127, 127, 127); border: 1px solid rgb(67, 71, 77); border-radius: 6px;"
         )
@@ -81,7 +164,7 @@ class ColorSwatchWidget(QtWidgets.QFrame):
         self.value_label = QtWidgets.QLabel("RGB 127, 127, 127")
         self.value_label.setProperty("metricTitle", True)
         self.value_label.setProperty("swatchLabel", True)
-        self.value_label.setFixedWidth(80)
+        self.value_label.setFixedWidth(76)
         self.value_label.setAlignment(QtCore.Qt.AlignCenter)
 
         layout.addWidget(self.title_label, 0, QtCore.Qt.AlignHCenter)
@@ -102,7 +185,7 @@ class SPDPlotWidget(QtWidgets.QFrame):
         super().__init__(parent)
         self.setProperty("card", True)
         self.setProperty("plot", True)
-        self.setMinimumHeight(230)
+        self.setMinimumHeight(240)
         self._rows = []
         self._curve_color = QtGui.QColor(255, 255, 255)
         self._peak_color = QtGui.QColor(255, 194, 82)
@@ -159,8 +242,8 @@ class SPDPlotWidget(QtWidgets.QFrame):
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
 
         rect = self.rect().adjusted(18, 12, -18, -10)
-        title_font = QtGui.QFont("Open Sans", 10, QtGui.QFont.DemiBold)
-        label_font = QtGui.QFont("Open Sans", 9)
+        title_font = QtGui.QFont("Open Sans", 9, QtGui.QFont.DemiBold)
+        label_font = QtGui.QFont("Open Sans", 8)
         title_metrics = QtGui.QFontMetrics(title_font)
         label_metrics = QtGui.QFontMetrics(label_font)
 
@@ -298,6 +381,225 @@ class SPDPlotWidget(QtWidgets.QFrame):
         )
 
 
+class ChromaticityCanvas(QtWidgets.QWidget):
+    """Painter-backed canvas for the CIE chromaticity diagram."""
+
+    def __init__(self, owner: "ChromaticityDiagramWidget", parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self._owner = owner
+        self._locus_pen = QtGui.QPen(QtGui.QColor(150, 153, 160), 1.0)
+        self._purple_pen = QtGui.QPen(QtGui.QColor(105, 108, 116), 0.8)
+        # primary layer: the measured point is bright neutral white with a
+        # dark ring (legible over bright field areas); D65 is subordinate gray
+        self._point_brush = QtGui.QBrush(QtGui.QColor(245, 247, 252))
+        self._point_ring = QtGui.QPen(QtGui.QColor(35, 37, 43), 1.2)
+        self._d65_brush = QtGui.QBrush(QtGui.QColor(158, 161, 168))
+
+    def _map(self, inner: QtCore.QRect, value: float, minimum: float, maximum: float) -> float:
+        return (value - minimum) / (maximum - minimum)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+
+        rect = self.rect().adjusted(4, 4, -4, -4)
+        label_font = QtGui.QFont("Open Sans", 7)
+        axis_font = QtGui.QFont("Open Sans", 8)
+        label_metrics = QtGui.QFontMetrics(label_font)
+        tick_band = label_metrics.height() + 4
+        left_band = label_metrics.horizontalAdvance("0.80") + 8
+
+        spec = CHROMATICITY_SYSTEMS[self._owner._system_key]
+        data = _get_chromaticity_data(spec["locus_method"])
+        x_min, x_max = spec["x_range"]
+        y_min, y_max = spec["y_range"]
+
+        avail = QtCore.QRect(
+            rect.left() + left_band,
+            rect.top(),
+            rect.width() - left_band - 4,
+            rect.height() - tick_band - 2,
+        )
+        # Strict equal pixel scale on both axes: the diagram keeps its true
+        # proportions no matter how the surrounding splitters are dragged.
+        aspect = (x_max - x_min) / (y_max - y_min)
+        if avail.height() <= 0 or avail.width() <= 0:
+            return
+        if avail.width() / float(avail.height()) > aspect:
+            plot_height = avail.height()
+            plot_width = int(plot_height * aspect)
+        else:
+            plot_width = avail.width()
+            plot_height = int(plot_width / aspect)
+        plot_rect = QtCore.QRect(
+            avail.left() + (avail.width() - plot_width) // 2,
+            avail.top() + (avail.height() - plot_height) // 2,
+            plot_width,
+            plot_height,
+        )
+        inner = plot_rect.adjusted(2, 2, -2, -2)
+
+        def to_x(value: float) -> float:
+            return inner.left() + self._map(inner, value, x_min, x_max) * inner.width()
+
+        def to_y(value: float) -> float:
+            return inner.bottom() - self._map(inner, value, y_min, y_max) * inner.height()
+
+        painter.setPen(QtGui.QPen(QtGui.QColor(67, 71, 77), 1))
+        painter.drawRoundedRect(plot_rect, 8, 8)
+
+        if data is None:
+            painter.setPen(QtGui.QColor(220, 220, 220))
+            painter.drawText(inner, QtCore.Qt.AlignCenter, "No locus data")
+            return
+
+        # Grid lines at the spec ticks.
+        grid_pen = QtGui.QPen(QtGui.QColor(55, 58, 64), 1)
+        grid_pen.setStyle(QtCore.Qt.DashLine)
+        painter.setPen(grid_pen)
+        for value in spec["ticks"]:
+            if x_min < value < x_max:
+                x = to_x(value)
+                painter.drawLine(QtCore.QPointF(x, inner.top()), QtCore.QPointF(x, inner.bottom()))
+            if y_min < value < y_max:
+                y = to_y(value)
+                painter.drawLine(QtCore.QPointF(inner.left(), y), QtCore.QPointF(inner.right(), y))
+
+        # Spectral locus path (shared by the colored fill and the outline).
+        positions = data["positions"]
+        locus_points = [QtCore.QPointF(to_x(point[0]), to_y(point[1])) for point in positions]
+        locus_path = QtGui.QPainterPath()
+        locus_path.moveTo(locus_points[0])
+        for point in locus_points[1:]:
+            locus_path.lineTo(point)
+
+        # Colored CIE background, pre-masked to the visible locus (alpha channel).
+        system = "uv" if spec["locus_method"] != "CIE 1931" else "cie1931"
+        field = chromaticity_image(
+            system, x_min, x_max, y_min, y_max, inner.width(), inner.height(),
+            locus=np.asarray(positions, dtype=float),
+        )
+        if not field.isNull():
+            painter.drawImage(inner, field)
+
+        axis_pen = QtGui.QPen(QtGui.QColor(120, 123, 130), 1)
+        painter.setPen(axis_pen)
+        painter.drawLine(inner.left(), inner.bottom(), inner.right(), inner.bottom())
+        painter.drawLine(inner.left(), inner.top(), inner.left(), inner.bottom())
+
+        painter.save()
+        painter.setClipRect(inner)
+
+        # Spectral locus outline.
+        painter.setPen(self._locus_pen)
+        painter.drawPath(locus_path)
+
+        # Line of purples (380 nm -> 780 nm endpoints).
+        start_index = _PURPLE_LINE_WAVELENGTHS[0] - _LOCUS_START_WAVELENGTH
+        end_index = _PURPLE_LINE_WAVELENGTHS[1] - _LOCUS_START_WAVELENGTH
+        if 0 <= start_index < len(positions) and 0 <= end_index < len(positions):
+            painter.setPen(self._purple_pen)
+            painter.drawLine(locus_points[start_index], locus_points[end_index])
+
+        # D65 white point.
+        d65 = data["d65"]
+        d65_point = QtCore.QPointF(to_x(float(d65[0])), to_y(float(d65[1])))
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(self._d65_brush)
+        painter.drawEllipse(d65_point, 1.6, 1.6)
+        painter.setPen(QtGui.QColor(158, 161, 168))
+        painter.setFont(label_font)
+        painter.drawText(QtCore.QRectF(d65_point.x() + 5, d65_point.y() - 12, 40, 14), QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, "D65")
+
+        # Measured point (primary layer): white with a dark ring.
+        measured = self._owner._point
+        if measured is not None:
+            x_value, y_value = measured
+            if x_min <= x_value <= x_max and y_min <= y_value <= y_max:
+                point_pos = QtCore.QPointF(to_x(x_value), to_y(y_value))
+                painter.setPen(self._point_ring)
+                painter.setBrush(self._point_brush)
+                painter.drawEllipse(point_pos, 2.6, 2.6)
+        painter.restore()
+
+        if self._owner._point is None:
+            painter.setPen(QtGui.QColor(150, 153, 160))
+            empty_rect = inner.adjusted(40, 40, -40, -40)
+            if empty_rect.width() > 0 and empty_rect.height() > 0:
+                painter.drawText(empty_rect, QtCore.Qt.AlignCenter, "No measurement data")
+
+        # Tick labels and axis names.
+        painter.setPen(QtGui.QColor(190, 190, 195))
+        painter.setFont(label_font)
+        tick_top = plot_rect.bottom() + 2
+        for value in spec["ticks"]:
+            if x_min < value < x_max:
+                x = to_x(value)
+                painter.drawText(QtCore.QRectF(x - 20, tick_top, 40, tick_band), QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter, f"{value:.1f}")
+            if y_min < value < y_max:
+                y = to_y(value)
+                painter.drawText(QtCore.QRectF(rect.left(), y - 7, left_band - 4, 14), QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, f"{value:.1f}")
+
+        painter.setFont(axis_font)
+        painter.setPen(QtGui.QColor(170, 172, 178))
+        axis_rect = QtCore.QRect(inner.left(), tick_top + 2, inner.width(), label_metrics.height())
+        painter.drawText(axis_rect, QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter, f"{spec['x_label']}")
+        y_label_rect = QtCore.QRect(rect.left(), inner.top(), left_band - 4, 14)
+        painter.drawText(y_label_rect, QtCore.Qt.AlignRight | QtCore.Qt.AlignTop, f"{spec['y_label']}")
+
+
+class ChromaticityDiagramWidget(QtWidgets.QFrame):
+    """Card holding a switchable CIE chromaticity diagram with the measured point."""
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setProperty("card", True)
+        self.setProperty("plot", True)
+        self.setMinimumHeight(240)
+        self._system_key = next(iter(CHROMATICITY_SYSTEMS))
+        self._point: Optional[tuple[float, float]] = None
+        self._point_xy: Optional[tuple[float, float]] = None
+        self._point_uv: Optional[tuple[float, float]] = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(9, 9, 9, 9)
+        layout.setSpacing(6)
+
+        header = QtWidgets.QHBoxLayout()
+        title = QtWidgets.QLabel("Chromaticity")
+        title.setProperty("section", True)
+        self.system_combo = QtWidgets.QComboBox()
+        for key in CHROMATICITY_SYSTEMS:
+            self.system_combo.addItem(key)
+        self.system_combo.currentIndexChanged.connect(self._on_system_changed)
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(self.system_combo)
+
+        self.canvas = ChromaticityCanvas(self)
+        layout.addLayout(header)
+        layout.addWidget(self.canvas, 1)
+
+    def _on_system_changed(self, index: int) -> None:
+        self._system_key = list(CHROMATICITY_SYSTEMS)[index]
+        if self._system_key == "CIE 1931 xy":
+            self._point = self._point_xy
+        else:
+            self._point = self._point_uv
+        self.canvas.update()
+
+    def set_point(self, x: float, y: float, u_prime: float, v_prime: float) -> None:
+        self._point_xy = (x, y)
+        self._point_uv = (u_prime, v_prime)
+        if self._system_key == "CIE 1931 xy":
+            self._point = self._point_xy
+        else:
+            self._point = self._point_uv
+        self.canvas.update()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -314,27 +616,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self._resize_for_screen()
         self._load_settings()
+        self._restore_splitter_states()
         self.refresh_ports()
         self.update_counter_state()
         self.update_filename_preview()
-        self.refresh_history_list()
+        self.refresh_project_tree()
         self._start_port_timer()
 
     def _build_ui(self) -> None:
-        central = QtWidgets.QWidget()
-        central.setProperty("surface", True)
-        self.setCentralWidget(central)
-        root = QtWidgets.QHBoxLayout(central)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(14)
-
         control_panel = self._build_control_panel()
         preview_panel = self._build_preview_panel()
         history_panel = self._build_history_panel()
 
-        root.addWidget(control_panel, 0)
-        root.addWidget(preview_panel, 1)
-        root.addWidget(history_panel, 0)
+        self.root_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.root_splitter.setProperty("surface", True)
+        self.root_splitter.setHandleWidth(4)
+        self.root_splitter.setChildrenCollapsible(False)
+        self.root_splitter.setContentsMargins(12, 12, 12, 12)
+        self.root_splitter.addWidget(control_panel)
+        self.root_splitter.addWidget(preview_panel)
+        self.root_splitter.addWidget(history_panel)
+        self.root_splitter.setStretchFactor(0, 0)
+        self.root_splitter.setStretchFactor(1, 1)
+        self.root_splitter.setStretchFactor(2, 0)
+        self.setCentralWidget(self.root_splitter)
 
     def _resize_for_screen(self) -> None:
         screen = QtWidgets.QApplication.primaryScreen()
@@ -352,11 +657,10 @@ class MainWindow(QtWidgets.QMainWindow):
         frame.setProperty("card", True)
         frame.setProperty("sidebar", True)
         frame.setMinimumWidth(300)
-        frame.setMaximumWidth(400)
         frame.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         layout = QtWidgets.QVBoxLayout(frame)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
 
         title = QtWidgets.QLabel("Capture Console")
         title.setProperty("title", True)
@@ -374,6 +678,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self._build_output_section())
         layout.addWidget(self._build_counter_section())
         layout.addWidget(self._build_action_section())
+        layout.addWidget(self._build_analysis_section())
         layout.addStretch(1)
         layout.addWidget(attribution)
         return frame
@@ -382,8 +687,8 @@ class MainWindow(QtWidgets.QMainWindow):
         box = QtWidgets.QFrame()
         box.setProperty("card", True)
         layout = QtWidgets.QVBoxLayout(box)
-        layout.setContentsMargins(9, 9, 9, 9)
-        layout.setSpacing(9)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
 
         label = QtWidgets.QLabel("Connection")
         label.setProperty("section", True)
@@ -433,22 +738,22 @@ class MainWindow(QtWidgets.QMainWindow):
         box = QtWidgets.QFrame()
         box.setProperty("card", True)
         layout = QtWidgets.QVBoxLayout(box)
-        layout.setContentsMargins(9, 9, 9, 9)
-        layout.setSpacing(9)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
 
         title = QtWidgets.QLabel("Output And Naming")
         title.setProperty("section", True)
         layout.addWidget(title)
 
-        output_label = QtWidgets.QLabel("Output Folder")
+        output_label = QtWidgets.QLabel("Project Folder")
         output_label.setProperty("fieldLabel", True)
         layout.addWidget(output_label)
 
         dir_row = QtWidgets.QHBoxLayout()
         self.output_dir_edit = QtWidgets.QLineEdit()
-        self.output_dir_edit.setPlaceholderText("Choose an output folder")
+        self.output_dir_edit.setPlaceholderText("Choose a project folder")
         self.output_dir_edit.textChanged.connect(self.update_filename_preview)
-        self.output_dir_edit.textChanged.connect(self.refresh_history_list)
+        self.output_dir_edit.textChanged.connect(self.refresh_project_tree)
         browse_button = QtWidgets.QPushButton("Browse")
         browse_button.setProperty("secondary", True)
         browse_button.clicked.connect(self.choose_output_dir)
@@ -461,8 +766,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         template_label = QtWidgets.QLabel("Filename Template")
         template_label.setProperty("fieldLabel", True)
-        template_hint = QtWidgets.QLabel("Keep it simple. Use only counter and timestamp.")
+        template_hint = QtWidgets.QLabel(
+            "Keep it simple. Use / in the template to create subfolders, "
+            "e.g. {date}/{counter}_{timestamp}."
+        )
         template_hint.setProperty("muted", True)
+        template_hint.setWordWrap(True)
 
         token_wrap = QtWidgets.QGridLayout()
         token_wrap.setHorizontalSpacing(4)
@@ -470,6 +779,8 @@ class MainWindow(QtWidgets.QMainWindow):
         tokens = [
             ("+counter", "{counter}"),
             ("+timestamp", "{timestamp}"),
+            ("+date", "{date}"),
+            ("+slash", "/"),
         ]
         for index, (label, token) in enumerate(tokens):
             button = QtWidgets.QPushButton(label)
@@ -500,8 +811,8 @@ class MainWindow(QtWidgets.QMainWindow):
         box = QtWidgets.QFrame()
         box.setProperty("card", True)
         layout = QtWidgets.QVBoxLayout(box)
-        layout.setContentsMargins(9, 9, 9, 9)
-        layout.setSpacing(9)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
 
         title = QtWidgets.QLabel("Auto Counter")
         title.setProperty("section", True)
@@ -554,8 +865,8 @@ class MainWindow(QtWidgets.QMainWindow):
         box = QtWidgets.QFrame()
         box.setProperty("card", True)
         layout = QtWidgets.QVBoxLayout(box)
-        layout.setContentsMargins(9, 9, 9, 9)
-        layout.setSpacing(9)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
 
         title = QtWidgets.QLabel("Measurement")
         title.setProperty("section", True)
@@ -564,9 +875,65 @@ class MainWindow(QtWidgets.QMainWindow):
         self.measure_button = QtWidgets.QPushButton("Capture Measurement")
         self.measure_button.setProperty("primaryAction", True)
         self.measure_button.clicked.connect(self.handle_measure)
-        self.measure_button.setMinimumHeight(32)
+        self.measure_button.setMinimumHeight(28)
         layout.addWidget(self.measure_button)
         return box
+
+    def _build_analysis_section(self) -> QtWidgets.QWidget:
+        box = QtWidgets.QFrame()
+        box.setProperty("card", True)
+        layout = QtWidgets.QVBoxLayout(box)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        title = QtWidgets.QLabel("Data Analysis（开发中）")
+        title.setProperty("section", True)
+        layout.addWidget(title)
+
+        grid = QtWidgets.QGridLayout()
+        grid.setSpacing(6)
+
+        self.compare_button = QtWidgets.QPushButton("Compare SPDs")
+        self.compare_button.setMinimumHeight(26)
+        self.compare_button.clicked.connect(lambda _=False: self._open_analysis_dialog(SPDComparisonDialog))
+
+        self.ratio_button = QtWidgets.QPushButton("Spectral Ratio")
+        self.ratio_button.setMinimumHeight(26)
+        self.ratio_button.clicked.connect(lambda _=False: self._open_analysis_dialog(SpectralRatioDialog))
+
+        self.gamut_button = QtWidgets.QPushButton("Gamut Coverage")
+        self.gamut_button.setMinimumHeight(26)
+        self.gamut_button.clicked.connect(lambda _=False: self._open_analysis_dialog(GamutDialog))
+
+        self.cri_button = QtWidgets.QPushButton("CRI / R-values")
+        self.cri_button.setMinimumHeight(26)
+        self.cri_button.clicked.connect(lambda _=False: self._open_analysis_dialog(CRIDialog))
+
+        grid.addWidget(self.compare_button, 0, 0)
+        grid.addWidget(self.ratio_button, 0, 1)
+        grid.addWidget(self.gamut_button, 1, 0)
+        grid.addWidget(self.cri_button, 1, 1)
+        layout.addLayout(grid)
+
+        hint = QtWidgets.QLabel("Offline processing of the CSVs in the output folder.")
+        hint.setProperty("muted", True)
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        return box
+
+    def _open_analysis_dialog(self, dialog_cls: type) -> None:
+        csv_dir = self.output_dir_edit.text().strip()
+        if not csv_dir:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Data Analysis",
+                "Choose an output folder first — the history CSVs are read from it.",
+            )
+            self.append_log("Analysis: no output folder set, dialog not opened.")
+            return
+        self.append_log(f"Opening {dialog_cls.__name__} …")
+        dialog = dialog_cls(csv_dir=csv_dir, parent=self)
+        dialog.exec_()
 
     def _build_preview_panel(self) -> QtWidgets.QWidget:
         frame = QtWidgets.QFrame()
@@ -575,24 +942,22 @@ class MainWindow(QtWidgets.QMainWindow):
         frame.setMinimumWidth(380)
         frame.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         layout = QtWidgets.QVBoxLayout(frame)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
 
         title = QtWidgets.QLabel("Measurement Snapshot")
         title.setProperty("title", True)
-        subtitle = QtWidgets.QLabel("Fast visual check of the latest spectrum export and key color metrics.")
-        subtitle.setProperty("muted", True)
 
         summary = QtWidgets.QFrame()
         summary.setProperty("card", True)
         summary.setProperty("hero", True)
         summary_layout = QtWidgets.QHBoxLayout(summary)
-        summary_layout.setContentsMargins(10, 10, 10, 10)
-        summary_layout.setSpacing(10)
+        summary_layout.setContentsMargins(6, 5, 6, 5)
+        summary_layout.setSpacing(8)
 
         summary_text_layout = QtWidgets.QVBoxLayout()
         summary_text_layout.setContentsMargins(0, 0, 0, 0)
-        summary_text_layout.setSpacing(7)
+        summary_text_layout.setSpacing(6)
         self.saved_name_label = QtWidgets.QLabel("File: --")
         self.saved_name_label.setProperty("savedName", True)
         self.saved_path_label = QtWidgets.QLabel("Path: --")
@@ -602,30 +967,42 @@ class MainWindow(QtWidgets.QMainWindow):
         summary_text_layout.addWidget(self.saved_path_label)
 
         self.spd_plot = SPDPlotWidget()
+        self.spd_plot.setMinimumWidth(260)
+        self.chromaticity = ChromaticityDiagramWidget()
+        self.chromaticity.setMinimumWidth(260)
+        plots_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        plots_splitter.setHandleWidth(4)
+        plots_splitter.setChildrenCollapsible(False)
+        plots_splitter.addWidget(self.spd_plot)
+        plots_splitter.addWidget(self.chromaticity)
+        plots_splitter.setStretchFactor(0, 3)
+        plots_splitter.setStretchFactor(1, 2)
+        self._plots_splitter = plots_splitter
+
         self.color_swatch = ColorSwatchWidget()
-        self.color_swatch.setFixedWidth(96)
+        self.color_swatch.setFixedWidth(88)
 
         summary_layout.addLayout(summary_text_layout, 1)
         summary_layout.addWidget(self.color_swatch, 0, QtCore.Qt.AlignTop)
 
         cards_grid = QtWidgets.QGridLayout()
-        cards_grid.setHorizontalSpacing(6)
-        cards_grid.setVerticalSpacing(10)
+        cards_grid.setHorizontalSpacing(5)
+        cards_grid.setVerticalSpacing(5)
         self.metric_cards = {
-            "xy": MetricCard("CIE 1931 x y"),
-            "xyz": MetricCard("CIE XYZ"),
-            "uv": MetricCard("CIE 1976 u'v'"),
-            "cct": MetricCard("CCT (Ohno 2013)"),
-            "nit": MetricCard("Luminance"),
-            "tint": MetricCard("Tint (Duv, Ohno 2013)"),
+            "xy": MetricCard("CIE 1931 x y", compact=True),
+            "xyz": MetricCard("CIE XYZ", compact=True),
+            "uv": MetricCard("CIE 1976 u'v'", compact=True),
+            "cct": MetricCard("CCT (Ohno 2013)", compact=True),
+            "nit": MetricCard("Luminance", compact=True),
+            "tint": MetricCard("Tint (Duv, Ohno 2013)", compact=True),
         }
         positions = [
             ("xy", 0, 0),
             ("uv", 0, 1),
-            ("xyz", 1, 0),
-            ("cct", 1, 1),
-            ("nit", 2, 0),
-            ("tint", 2, 1),
+            ("xyz", 0, 2),
+            ("cct", 1, 0),
+            ("nit", 1, 1),
+            ("tint", 1, 2),
         ]
         for key, row, col in positions:
             cards_grid.addWidget(self.metric_cards[key], row, col)
@@ -636,13 +1013,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_edit.setReadOnly(True)
         self.log_edit.setProperty("console", True)
 
+        top_section = QtWidgets.QWidget()
+        top_layout = QtWidgets.QVBoxLayout(top_section)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(8)
+        top_layout.addWidget(summary)
+        top_layout.addLayout(cards_grid)
+        top_section.setMinimumHeight(128)
+
+        plots_splitter.setMinimumHeight(230)
+
+        log_section = QtWidgets.QWidget()
+        log_layout = QtWidgets.QVBoxLayout(log_section)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        log_layout.setSpacing(6)
+        log_layout.addWidget(log_label)
+        log_layout.addWidget(self.log_edit, 1)
+        log_section.setMinimumHeight(96)
+
+        self._center_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self._center_splitter.setChildrenCollapsible(False)
+        self._center_splitter.addWidget(top_section)
+        self._center_splitter.addWidget(plots_splitter)
+        self._center_splitter.addWidget(log_section)
+        self._center_splitter.setStretchFactor(0, 0)
+        self._center_splitter.setStretchFactor(1, 1)
+        self._center_splitter.setStretchFactor(2, 1)
+
         layout.addWidget(title)
-        layout.addWidget(subtitle)
-        layout.addWidget(summary)
-        layout.addWidget(self.spd_plot)
-        layout.addLayout(cards_grid)
-        layout.addWidget(log_label)
-        layout.addWidget(self.log_edit, 1)
+        layout.addWidget(self._center_splitter, 1)
         return frame
 
     def _build_history_panel(self) -> QtWidgets.QWidget:
@@ -650,35 +1049,50 @@ class MainWindow(QtWidgets.QMainWindow):
         frame.setProperty("card", True)
         frame.setProperty("mainpanel", True)
         frame.setMinimumWidth(210)
-        frame.setMaximumWidth(290)
+        frame.setMaximumWidth(420)
         frame.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         layout = QtWidgets.QVBoxLayout(frame)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(9)
+        layout.setContentsMargins(9, 9, 9, 9)
+        layout.setSpacing(8)
 
-        history_label = QtWidgets.QLabel("History Measurements")
+        history_label = QtWidgets.QLabel("Project Folder")
         history_label.setProperty("title", True)
 
+        self.project_path_label = QtWidgets.QLabel("--")
+        self.project_path_label.setProperty("muted", True)
+        self.project_path_label.setWordWrap(True)
+
         button_row = QtWidgets.QHBoxLayout()
-        button_row.setSpacing(7)
+        button_row.setSpacing(6)
+        self.history_open_folder_button = QtWidgets.QPushButton("Open Folder")
+        self.history_open_folder_button.setProperty("secondary", True)
+        self.history_open_folder_button.clicked.connect(self.choose_output_dir)
+        self.history_new_folder_button = QtWidgets.QPushButton("New Folder")
+        self.history_new_folder_button.setProperty("secondary", True)
+        self.history_new_folder_button.clicked.connect(self.create_project_folder)
         self.history_refresh_button = QtWidgets.QPushButton("Refresh")
         self.history_refresh_button.setProperty("secondary", True)
-        self.history_refresh_button.clicked.connect(self.refresh_history_list)
+        self.history_refresh_button.clicked.connect(self.refresh_project_tree)
         self.history_open_button = QtWidgets.QPushButton("Open CSV")
         self.history_open_button.setProperty("secondary", True)
         self.history_open_button.clicked.connect(self.choose_history_csv)
+        button_row.addWidget(self.history_open_folder_button)
+        button_row.addWidget(self.history_new_folder_button)
         button_row.addWidget(self.history_refresh_button)
         button_row.addWidget(self.history_open_button)
 
-        self.history_list = QtWidgets.QListWidget()
-        self.history_list.setProperty("historyList", True)
-        self.history_list.setMinimumHeight(110)
-        self.history_list.itemActivated.connect(self.handle_history_item_activated)
-        self.history_list.itemClicked.connect(self.handle_history_item_activated)
+        self.history_tree = QtWidgets.QTreeWidget()
+        self.history_tree.setHeaderHidden(True)
+        self.history_tree.setProperty("historyList", True)
+        self.history_tree.setMinimumHeight(96)
+        self.history_tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.history_tree.customContextMenuRequested.connect(self._show_tree_context_menu)
+        self.history_tree.itemClicked.connect(self.handle_history_item_activated)
 
         layout.addWidget(history_label)
+        layout.addWidget(self.project_path_label)
         layout.addLayout(button_row)
-        layout.addWidget(self.history_list, 1)
+        layout.addWidget(self.history_tree, 1)
         return frame
 
     def _start_port_timer(self) -> None:
@@ -698,7 +1112,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def choose_output_dir(self) -> None:
         directory = QtWidgets.QFileDialog.getExistingDirectory(
             self,
-            "Choose Output Folder",
+            "Choose Project Folder",
             self.output_dir_edit.text() or str(Path.cwd()),
         )
         if directory:
@@ -735,40 +1149,163 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.update_filename_preview()
 
-    def refresh_history_list(self) -> None:
+    def refresh_project_tree(self) -> None:
         output_dir = self.output_dir_edit.text().strip()
+        root = Path(output_dir) if output_dir else None
         items = list_history_csv_files(output_dir)
+        self.project_path_label.setText(output_dir or "--")
 
-        self.history_list.clear()
+        # directories shown in the tree: every folder on disk (hidden and junk
+        # folders pruned), plus any folder implied by a CSV relative path
+        directory_names: set = set()
+        if root is not None and root.exists():
+            for entry in root.rglob("*"):
+                if not entry.is_dir():
+                    continue
+                parts = entry.relative_to(root).parts
+                if any(part.startswith(".") or part in NOISY_DIR_NAMES for part in parts):
+                    continue
+                directory_names.add(entry.relative_to(root).as_posix())
+
+        files_by_dir: Dict[str, List[HistoryCsvItem]] = {}
         for item in items:
-            list_item = QtWidgets.QListWidgetItem(item.name)
-            list_item.setData(QtCore.Qt.UserRole, item.path)
-            modified = QtCore.QDateTime.fromSecsSinceEpoch(int(item.modified_timestamp)).toString(
-                "yyyy-MM-dd HH:mm:ss"
-            )
-            list_item.setToolTip(f"{item.path}\nModified: {modified}")
-            self.history_list.addItem(list_item)
+            parts = item.name.split("/")
+            if any(part.startswith(".") or part in NOISY_DIR_NAMES for part in parts[:-1]):
+                continue
+            rel_dir = "/".join(parts[:-1])
+            for index in range(1, len(parts)):
+                directory_names.add("/".join(parts[:index]))
+            files_by_dir.setdefault(rel_dir, []).append(item)
 
-        if not items:
-            placeholder = QtWidgets.QListWidgetItem("No CSV history in current output folder")
+        folder_icon = self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon)
+        file_icon = self.style().standardIcon(QtWidgets.QStyle.SP_FileIcon)
+
+        self.history_tree.blockSignals(True)
+        self.history_tree.clear()
+        folder_items: Dict[str, QtWidgets.QTreeWidgetItem] = {}
+
+        for rel_dir in sorted(directory_names, key=lambda name: (name.count("/"), name)):
+            parent_key, _, part = rel_dir.rpartition("/")
+            folder_item = QtWidgets.QTreeWidgetItem([part])
+            folder_item.setIcon(0, folder_icon)
+            folder_item.setData(0, QtCore.Qt.UserRole, str(root / rel_dir))
+            folder_item.setData(0, QtCore.Qt.UserRole + 1, "dir")
+            parent = folder_items.get(parent_key)
+            if parent is None:
+                self.history_tree.addTopLevelItem(folder_item)
+            else:
+                parent.addChild(folder_item)
+            folder_items[rel_dir] = folder_item
+
+        for rel_dir in sorted(files_by_dir):
+            parent = folder_items.get(rel_dir)
+            for item in sorted(files_by_dir[rel_dir], key=lambda entry: entry.name):
+                parts = item.name.split("/")
+                leaf_item = QtWidgets.QTreeWidgetItem([parts[-1]])
+                leaf_item.setIcon(0, file_icon)
+                leaf_item.setData(0, QtCore.Qt.UserRole, item.path)
+                leaf_item.setData(0, QtCore.Qt.UserRole + 1, "file")
+                modified = QtCore.QDateTime.fromSecsSinceEpoch(int(item.modified_timestamp)).toString(
+                    "yyyy-MM-dd HH:mm:ss"
+                )
+                leaf_item.setToolTip(0, f"{item.path}\nModified: {modified}")
+                if parent is None:
+                    self.history_tree.addTopLevelItem(leaf_item)
+                else:
+                    parent.addChild(leaf_item)
+
+        # Expansion only sticks once items are attached to the tree.
+        for folder_item in folder_items.values():
+            folder_item.setExpanded(True)
+
+        if self.history_tree.topLevelItemCount() == 0:
+            placeholder = QtWidgets.QTreeWidgetItem(["No CSV files in this folder"])
             placeholder.setFlags(QtCore.Qt.NoItemFlags)
-            self.history_list.addItem(placeholder)
-            return
+            self.history_tree.addTopLevelItem(placeholder)
+        self.history_tree.blockSignals(False)
 
         if self._current_preview_path:
             self._select_history_path(self._current_preview_path)
 
+    def create_project_folder(self) -> None:
+        root = self.output_dir_edit.text().strip()
+        if not root:
+            QtWidgets.QMessageBox.warning(
+                self, "Missing Project Folder", "Choose a project folder first."
+            )
+            return
+        name, ok = QtWidgets.QInputDialog.getText(
+            self, "New Folder", "Folder name (inside the project folder):"
+        )
+        if not ok:
+            return
+        safe_name = sanitize_filename_part(name)
+        if not safe_name:
+            QtWidgets.QMessageBox.warning(
+                self, "Invalid Folder Name", "Folder name is empty after cleanup."
+            )
+            return
+        target = Path(root) / safe_name
+        try:
+            target.mkdir(exist_ok=False)
+        except FileExistsError:
+            QtWidgets.QMessageBox.warning(
+                self, "Folder Exists", f"'{safe_name}' already exists in the project folder."
+            )
+            return
+        except OSError as exc:
+            QtWidgets.QMessageBox.warning(self, "Create Folder Failed", str(exc))
+            return
+        self.append_log(f"Created folder {target}.")
+        self.refresh_project_tree()
+
+    def _show_tree_context_menu(self, position: QtCore.QPoint) -> None:
+        item = self.history_tree.itemAt(position)
+        if item is None:
+            return
+        path = item.data(0, QtCore.Qt.UserRole)
+        if not path:
+            return
+        is_dir = item.data(0, QtCore.Qt.UserRole + 1) == "dir"
+        menu = QtWidgets.QMenu(self)
+        open_action = menu.addAction("Open in Explorer")
+        copy_action = menu.addAction("Copy Path")
+        chosen = menu.exec_(self.history_tree.viewport().mapToGlobal(position))
+        if chosen == open_action:
+            if is_dir:
+                subprocess.Popen(["explorer", str(Path(path))])
+            else:
+                subprocess.Popen(["explorer", f"/select,\"{path}\""])
+        elif chosen == copy_action:
+            QtWidgets.QApplication.clipboard().setText(str(Path(path)))
+
     def _select_history_path(self, csv_path: str) -> None:
         normalized_target = str(Path(csv_path))
-        for index in range(self.history_list.count()):
-            item = self.history_list.item(index)
-            item_path = item.data(QtCore.Qt.UserRole)
-            if item_path and str(Path(item_path)) == normalized_target:
-                self.history_list.setCurrentItem(item)
-                break
 
-    def handle_history_item_activated(self, item: QtWidgets.QListWidgetItem) -> None:
-        csv_path = item.data(QtCore.Qt.UserRole)
+        def find(node: QtWidgets.QTreeWidgetItem) -> Optional[QtWidgets.QTreeWidgetItem]:
+            for index in range(node.childCount()):
+                child = node.child(index)
+                item_path = child.data(0, QtCore.Qt.UserRole)
+                if item_path and str(Path(item_path)) == normalized_target:
+                    return child
+                found = find(child)
+                if found is not None:
+                    return found
+            return None
+
+        selected = find(self.history_tree.invisibleRootItem())
+        if selected is not None:
+            ancestor = selected.parent()
+            while ancestor is not None:
+                ancestor.setExpanded(True)
+                ancestor = ancestor.parent()
+            self.history_tree.setCurrentItem(selected)
+            self.history_tree.scrollToItem(selected)
+
+    def handle_history_item_activated(self, item: QtWidgets.QTreeWidgetItem) -> None:
+        if item.data(0, QtCore.Qt.UserRole + 1) != "file":
+            return
+        csv_path = item.data(0, QtCore.Qt.UserRole)
         if not csv_path:
             return
         self.load_history_csv(csv_path)
@@ -920,7 +1457,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.current_counter_spin.setValue(record.next_sequence_number)
         self.update_counter_state()
         self.update_filename_preview()
-        self.refresh_history_list()
+        self.refresh_project_tree()
 
     def _after_load_history(self, preview) -> None:
         saved_path = preview.csv_path or ""
@@ -938,6 +1475,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.metric_cards["nit"].set_value(f"{preview.luminance_nits:.4f} nit")
         self.metric_cards["tint"].set_value(f"{preview.tint_duv:+.6f}")
         self.spd_plot.set_rows(preview.spectral_rows)
+        self.chromaticity.set_point(preview.x, preview.y, preview.u_prime, preview.v_prime)
         self.color_swatch.set_color(preview.srgb_8bit)
         if saved_path:
             self._select_history_path(saved_path)
@@ -996,6 +1534,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.disconnect_button,
             self.measure_button,
             self.refresh_button,
+            self.history_open_folder_button,
+            self.history_new_folder_button,
             self.history_refresh_button,
             self.history_open_button,
             self.port_combo,
@@ -1005,7 +1545,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.counter_start_spin,
             self.current_counter_spin,
             self.step_spin,
-            self.history_list,
+            self.history_tree,
+            self.compare_button,
+            self.ratio_button,
+            self.gamut_button,
+            self.cri_button,
         ]
         for widget in widgets:
             widget.setEnabled(not busy)
@@ -1041,7 +1585,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_counter_spin.setValue(self._settings.value("counter_current", 0, type=int))
         self.step_spin.setValue(self._settings.value("step", 10, type=int))
 
+    def _restore_splitter_states(self) -> None:
+        for key, splitter in (
+            ("root_splitter", self.root_splitter),
+            ("plots_splitter", self._plots_splitter),
+            ("center_splitter", self._center_splitter),
+        ):
+            state = self._settings.value(key, type=QtCore.QByteArray)
+            if state is None:
+                continue
+            try:
+                splitter.restoreState(state)
+            except Exception:
+                pass
+
     def closeEvent(self, event) -> None:
+        self._settings.setValue("root_splitter", self.root_splitter.saveState())
+        self._settings.setValue("plots_splitter", self._plots_splitter.saveState())
+        self._settings.setValue("center_splitter", self._center_splitter.saveState())
         self._settings.setValue("output_dir", self.output_dir_edit.text().strip())
         self._settings.setValue("template", self.template_edit.text().strip())
         self._settings.setValue("counter_enabled", self.counter_enabled_check.isChecked())

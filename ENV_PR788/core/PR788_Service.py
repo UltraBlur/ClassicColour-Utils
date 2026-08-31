@@ -59,12 +59,15 @@ def list_history_csv_files(csv_dir: str) -> List[HistoryCsvItem]:
         return []
 
     items: List[HistoryCsvItem] = []
-    for csv_path in directory.glob("*.csv"):
+    for csv_path in sorted(directory.rglob("*.csv")):
+        rel_parts = csv_path.relative_to(directory).parts
+        if any(part.startswith(".") for part in rel_parts):
+            continue
         stat = csv_path.stat()
         items.append(
             HistoryCsvItem(
                 path=str(csv_path),
-                name=csv_path.name,
+                name=csv_path.relative_to(directory).as_posix(),
                 modified_timestamp=stat.st_mtime,
             )
         )
@@ -83,21 +86,40 @@ def sanitize_filename_part(value: str) -> str:
     return cleaned.strip("._")
 
 
+def _render_template_segment(segment: str) -> str:
+    """Flatten a single path segment with the legacy filename rules."""
+    rendered = re.sub(r"[_-]{2,}", "_", segment)
+    rendered = rendered.strip("_-. ")
+    return sanitize_filename_part(rendered)
+
+
 def render_filename_template(
     template: str,
     variables: Dict[str, object],
     extension: str = ".csv",
 ) -> str:
+    """Render a template into a (possibly nested) relative path.
+
+    ``/`` and ``\\`` in the template become subfolder separators; every segment
+    is sanitized independently and empty segments are dropped. A template
+    without separators renders exactly like the original flat filename rules.
+    """
     normalized_template = template.strip() or "{counter}_{timestamp}"
-    rendered = normalized_template.format_map(
-        {key: sanitize_filename_part(str(value)) for key, value in variables.items()}
+    rendered = normalized_template.replace("\\", "/").format_map(
+        {key: str(value) for key, value in variables.items()}
     )
-    rendered = re.sub(r"[_-]{2,}", "_", rendered)
-    rendered = rendered.strip("_-. ")
-    rendered = sanitize_filename_part(rendered) or "measurement"
-    if not rendered.lower().endswith(extension.lower()):
-        rendered = f"{rendered}{extension}"
-    return rendered
+    segments = [
+        _render_template_segment(segment)
+        for segment in rendered.split("/")
+        if segment.strip()
+    ]
+    segments = [segment for segment in segments if segment]
+    if not segments:
+        segments = ["measurement"]
+    last = segments[-1]
+    if not last.lower().endswith(extension.lower()):
+        segments[-1] = f"{last}{extension}"
+    return "/".join(segments)
 
 
 def build_template_variables(
