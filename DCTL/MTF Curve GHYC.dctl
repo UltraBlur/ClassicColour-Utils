@@ -1,0 +1,257 @@
+// clang-format off
+DEFINE_UI_PARAMS(gain1, Band 64:1 Contrast, DCTLUI_SLIDER_FLOAT, 1.0, 0.0, 2.0, 0.1)
+DEFINE_UI_PARAMS(gain2, Band 16:1 Contrast, DCTLUI_SLIDER_FLOAT, 1.0, 0.0, 2.0, 0.1)
+DEFINE_UI_PARAMS(gain3, Band 8:1 Contrast, DCTLUI_SLIDER_FLOAT, 1.0, 0.0, 2.0, 0.1)
+DEFINE_UI_PARAMS(gain4, Band 4:1 Contrast, DCTLUI_SLIDER_FLOAT, 1.0, 0.0, 2.0, 0.1)
+DEFINE_UI_PARAMS(gain5, Band 2:1 Contrast, DCTLUI_SLIDER_FLOAT, 1.0, 0.0, 2.0, 0.1)
+DEFINE_UI_PARAMS(gain6, Band 1:1 Contrast, DCTLUI_SLIDER_FLOAT, 1.0, 0.0, 2.0, 0.1)
+DEFINE_UI_PARAMS(debug_band, Debug Band, DCTLUI_SLIDER_INT, 6, 1, 6, 1)
+DEFINE_UI_PARAMS(debug_mode, Debug Mode, DCTLUI_COMBO_BOX, 0, {NONE, LP, HP, HPG}, {None, Low Pass Mode, High Pass Mode, High Pass Gray Mode})
+DEFINE_UI_PARAMS(method, Method, DCTLUI_COMBO_BOX, 1, {QUOTIENT, DIFFERENCE}, {Quotient, Difference})
+// clang-format on
+
+__DEVICE__ float powf(float base, float exp) {
+    float out = _copysignf(_powf(_fabs(base), exp), base);
+    return out;
+}
+
+__DEVICE__ float3 get_color(int p_X, int p_Y, __TEXTURE__ p_TexR, __TEXTURE__ p_TexG, __TEXTURE__ p_TexB) {
+    float r = _tex2D(p_TexR, p_X, p_Y);
+    float g = _tex2D(p_TexG, p_X, p_Y);
+    float b = _tex2D(p_TexB, p_X, p_Y);
+
+    return make_float3(r, g, b);
+}
+
+///////////////////////////////
+// Nearest Neighbors sampling
+//////////////////////////////
+
+__DEVICE__ float sample_point_nn_1ch(float x, float y, __TEXTURE__ tex, float scale, bool clamp) {
+    const float scale_round = _round(scale);
+    const int iX = (int)(_round(x / scale_round) * scale_round);
+    const int iY = (int)(_round(y / scale_round) * scale_round);
+    float c = _tex2D(tex, iX, iY);
+    if (clamp) {
+        c = _fmaxf(c, 0.0);
+    }
+    return c;
+}
+
+__DEVICE__ float3 sample_point_nn_3ch(float x, float y, __TEXTURE__ p_TexR, __TEXTURE__ p_TexG, __TEXTURE__ p_TexB, float scale, bool clamp) {
+    float3 out = make_float3(0.0, 0.0, 0.0);
+    out.x = sample_point_nn_1ch(x, y, p_TexR, scale, clamp);
+    out.y = sample_point_nn_1ch(x, y, p_TexG, scale, clamp);
+    out.z = sample_point_nn_1ch(x, y, p_TexB, scale, clamp);
+    return out;
+}
+
+//////////////////////////
+// Fast Blur method
+//////////////////////////
+
+// Sampling Kernel
+// Lower left 0 is the (0,0) coordinate.
+// Number indicates the band, takes 64 samples
+// and constructs a box blur of varying qualities
+// of edge size 2, 4, 8, 16
+
+// - - - - 3 - - - 3 - - - 3 - - -
+// - - - - - - - - - - - - - - - -
+// - - 3 - - - 3 - - - 3 - - 3 - -
+// 3 - - - - - - - - - - - - - - -
+// - - - - - 2 - 2 - 2 - 2 - - - 3
+// - - 3 - 2 - 2 - 2 - 2 - - - - -
+// - - - - - 2 1 1 1 1 - 2 - 3 - -
+// 3 - - - 2 - 1 0 0 1 2 - - - - -
+// - - - - - 2 1 0 0 1 - 2 - - - 3
+// - - 3 - 2 - 1 1 1 1 2 - - - - -
+// - - - - - 2 - 2 - 2 - 2 - 3 - -
+// 3 - - - 2 - 2 - 2 - 2 - - - - -
+// - - - - - - - - - - - - - - - 3
+// - - 3 - - 3 - - - 3 - - - 3 - -
+// - - - - - - - - - - - - - - - -
+// - - - 3 - - - 3 - - - 3 - - - -
+
+__CONSTANT__ int band0_idxs[4][2] = {
+    {0, 0},
+    {0, 1},
+    {1, 0},
+    {1, 1},
+};
+
+__CONSTANT__ int band1_idxs[12][2] = {
+    {-1, -1},
+    {-1, 0},
+    {-1, 1},
+    {-1, 2},
+    {0, 2},
+    {1, 2},
+    {2, 2},
+    {2, 1},
+    {2, 0},
+    {2, -1},
+    {1, -1},
+    {0, -1},
+};
+
+__CONSTANT__ int band2_idxs[24][2] = {
+    {-2, -2}, {-2, 0}, {-2, 2}, {-1, 3}, {1, 3}, {3, 3}, {3, 1}, {3, -1}, {2, -2}, {0, -2}, {-3, -3}, {-3, -1},
+    {-3, 1},  {-3, 3}, {-2, 4}, {0, 4},  {2, 4}, {4, 4}, {4, 2}, {4, 0},  {4, -2}, {3, -3}, {1, -3},  {-1, -3},
+};
+
+__CONSTANT__ int band3_idxs[24][2] = {
+    {-5, -5},                    // *
+    {-5, -1}, {-5, 3},  {-5, 6}, // *
+    {-1, 6},  {3, 6},   {6, 6},  // *
+    {6, 2},   {6, -2},  {6, -5}, // *
+    {2, -5},  {-2, -5}, {-7, -4}, {-7, 1}, {-7, 5}, {-3, 8}, {1, 8}, {5, 8}, {8, 4}, {8, 0}, {8, -4}, {4, -7}, {0, -7}, {-4, -7},
+};
+
+__CONSTANT__ int band4_idxs[24][2] = {
+    {-11, -11}, {-11, -3}, {-11, 5}, {-11, 13}, {-3, 13}, {5, 13}, {13, 13}, {13, 5},
+    {13, -3}, {13, -11}, {5, -11}, {-3, -11}, {-15, -8}, {-15, 2}, {-15, 11}, {-6, 17},
+    {2, 17}, {10, 17}, {17, 9}, {17, 1}, {17, -8}, {9, -15}, {1, -15}, {-7, -15},
+};
+
+__CONSTANT__ int band5_idxs[24][2] = {
+    {-23, -23}, {-23, -7}, {-23, 9}, {-23, 25}, {-7, 25}, {9, 25}, {25, 25}, {25, 9},
+    {25, -7}, {25, -23}, {9, -23}, {-7, -23}, {-31, -16}, {-31, 3}, {-31, 21}, {-13, 33},
+    {3, 33}, {19, 33}, {33, 17}, {33, 1}, {33, -16}, {17, -31}, {1, -31}, {-15, -31},
+};
+
+__DEVICE__ void get_blur_bands(int px, int py, __TEXTURE__ pr, __TEXTURE__ pg, __TEXTURE__ pb, float scale, float3 ret[6], bool clamp) {
+    // Blurs the image by six different amounts, returns each one in ret.
+    float3 total = make_float3(0.0, 0.0, 0.0);
+    float coeff = 0.0;
+    float coeff_sum = 0.0;
+    float3 value;
+    float x, y;
+    scale = _fmaxf(1.0, scale);
+    for (int i = 0; i < 4; ++i) {
+        x = px + ((float)band0_idxs[i][0] - 0.5) * scale;
+        y = py + ((float)band0_idxs[i][1] - 0.5) * scale;
+        value = sample_point_nn_3ch(x, y, pr, pg, pb, 1.0, clamp);
+        coeff = 1.0;
+        total += value * coeff;
+        coeff_sum += coeff;
+    }
+    ret[5] = total / coeff_sum;
+    for (int i = 0; i < 12; ++i) {
+        x = px + ((float)band1_idxs[i][0] - 0.5) * scale;
+        y = py + ((float)band1_idxs[i][1] - 0.5) * scale;
+        value = sample_point_nn_3ch(x, y, pr, pg, pb, 1.0, clamp);
+        coeff = 1.0;
+        total += value * coeff;
+        coeff_sum += coeff;
+    }
+    ret[4] = total / coeff_sum;
+    for (int i = 0; i < 24; ++i) {
+        x = px + ((float)band2_idxs[i][0] - 0.5) * scale;
+        y = py + ((float)band2_idxs[i][1] - 0.5) * scale;
+        value = sample_point_nn_3ch(x, y, pr, pg, pb, 1.0, clamp);
+        coeff = 1.0;
+        total += value * coeff;
+        coeff_sum += coeff;
+    }
+    ret[3] = total / coeff_sum;
+    for (int i = 0; i < 24; ++i) {
+        x = px + ((float)band3_idxs[i][0] - 0.5) * scale;
+        y = py + ((float)band3_idxs[i][1] - 0.5) * scale;
+        value = sample_point_nn_3ch(x, y, pr, pg, pb, 1.0, clamp);
+        coeff = 1.0;
+        total += value * coeff;
+        coeff_sum += coeff;
+    }
+    ret[2] = total / coeff_sum;
+    for (int i = 0; i < 24; ++i) {
+        x = px + ((float)band4_idxs[i][0] - 0.5) * scale;
+        y = py + ((float)band4_idxs[i][1] - 0.5) * scale;
+        value = sample_point_nn_3ch(x, y, pr, pg, pb, 1.0, clamp);
+        coeff = 1.0;
+        total += value * coeff;
+        coeff_sum += coeff;
+    }
+    ret[1] = total / coeff_sum;
+    for (int i = 0; i < 24; ++i) {
+        x = px + ((float)band5_idxs[i][0] - 0.5) * scale;
+        y = py + ((float)band5_idxs[i][1] - 0.5) * scale;
+        value = sample_point_nn_3ch(x, y, pr, pg, pb, 1.0, clamp);
+        coeff = 1.0;
+        total += value * coeff;
+        coeff_sum += coeff;
+    }
+    ret[0] = total / coeff_sum;
+}
+
+// Return the minimum new_width that would resolve the line pairs.
+__DEVICE__ int compute_scale(float gate_width, float lpmm) {
+    // By nyquist, x line pairs requires 2x samples to resolve. Thus:
+    int new_width = (int)(lpmm * gate_width * 2.0);
+    return new_width;
+}
+
+__DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, __TEXTURE__ p_TexR, __TEXTURE__ p_TexG, __TEXTURE__ p_TexB) {
+    float3 curr_color = get_color(p_X, p_Y, p_TexR, p_TexG, p_TexB);
+    // float scale = (float)p_Width / (float)compute_scale(gate_width, lpm4);
+    float scale = 2.0;
+    float3 downres[6] = {
+        make_float3(0.0, 0.0, 0.0),
+        make_float3(0.0, 0.0, 0.0),
+        make_float3(0.0, 0.0, 0.0),
+        make_float3(0.0, 0.0, 0.0),
+        make_float3(0.0, 0.0, 0.0),
+        make_float3(0.0, 0.0, 0.0),
+    };
+    float3 edges[6] = {
+        make_float3(0.0, 0.0, 0.0),
+        make_float3(0.0, 0.0, 0.0),
+        make_float3(0.0, 0.0, 0.0),
+        make_float3(0.0, 0.0, 0.0),
+        make_float3(0.0, 0.0, 0.0),
+        make_float3(0.0, 0.0, 0.0),
+    };
+    float gains[6] = {gain1, gain2, gain3, gain4, gain5, gain6};
+
+    get_blur_bands(p_X, p_Y, p_TexR, p_TexG, p_TexB, scale, downres, method == QUOTIENT);
+
+    float3 result = downres[0];
+    if (method == QUOTIENT) {
+        edges[0] = downres[1] / downres[0];
+        edges[1] = downres[2] / downres[1];
+        edges[2] = downres[3] / downres[2];
+        edges[3] = downres[4] / downres[3];
+        edges[4] = downres[5] / downres[4];
+        edges[5] = curr_color / downres[5];
+        for (int i = 0; i < 6; ++i) {
+            result.x *= powf(edges[i].x, gains[i]);
+            result.y *= powf(edges[i].y, gains[i]);
+            result.z *= powf(edges[i].z, gains[i]);
+        }
+    } else {
+        edges[0] = downres[1] - downres[0];
+        edges[1] = downres[2] - downres[1];
+        edges[2] = downres[3] - downres[2];
+        edges[3] = downres[4] - downres[3];
+        edges[4] = downres[5] - downres[4];
+        edges[5] = curr_color - downres[5];
+        for (int i = 0; i < 6; ++i) {
+            result += edges[i] * gains[i];
+        }
+    }
+
+    if (debug_mode == LP) {
+        result = downres[debug_band - 1];
+    } else if (debug_mode == HP) {
+        result = edges[debug_band - 1];
+    } else if (debug_mode == HPG) {
+        if (method == QUOTIENT) {
+            // edges are 1.0 on average
+            result = edges[debug_band - 1] * 0.5;
+        } else {
+            // edges are 0.0 on average
+            result = 0.5 + edges[debug_band - 1];
+        }
+    }
+    return result;
+}
