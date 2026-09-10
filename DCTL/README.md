@@ -34,7 +34,7 @@ D(x, h) = count{ y : L(x, y) ≈ h }
 
 对每个输出像素 `(x, y)`：
 
-1. **Pass 1** — 用 `_tex2D` 沿本列采样 `bins` 个等距行，得到亮度剖面 `w[j]`（`j=0` 对应画面最上一行），做 exposure / gamma / invert 处理
+1. **Pass 1** — 用 `_tex2D` 沿本列采样 `bins` 个等距行，得到亮度剖面 `w[j]`（`j=0` 对应画面最上一行），做 exposure / gamma 处理
 2. **取 u** — 采样位置 `u = y / H`（像素的行位置，自上而下）
 3. **Pass 2** — 对 `w[]` 的累积分布 CDF 做**逆查找**（含线性插值），得到剖面位置 `pos ∈ [0,1)`
 4. **输出** — `level = 1 - pos`，使电平 1.0（示波器顶部）对应画面最上一行 → **画面正立**；输出灰度 `(level, level, level)`
@@ -90,12 +90,7 @@ D(x, h) = count{ y : L(x, y) ≈ h }
 | **Row Samples** | 2 | 每个 bin 内的行采样数（盒式平均）。1 = 点采样（快，但细密横向纹理会混叠）；2–4 = 抗混叠，隐藏画面更干净 |
 | **Dot Contrast** | 1.8 | 对亮度剖面加 gamma。调大 → 暗部更疏、亮部更密，隐藏画面对比度更高（默认 1.8 比传统 1.3 更能撑开暗部细节） |
 | **Exposure** | 1.0 | 剖面整体增益。原片偏暗时调大 |
-| **Output Gamma** | 1.0 | 对输出电平加 gamma，改变画面在**电平轴上的分布**（隐藏画面会被纵向拉伸/压缩） |
 | **Reveal Original** | 0.0 | 与原图混合。从 0 拉到 1，画面从条纹渐变回原片，示波器上的隐藏画面同步"融化"——很适合做转场 |
-| **Invert Picture** | 0 | 反相隐藏画面（亮暗互换） |
-| **Flip Vertical** | 0 | 隐藏画面上下翻转 |
-| **Flip Horizontal** | 0 | 隐藏画面左右镜像 |
-| **Scope Graticule** | 0 | 叠加仿示波器刻度线（会作为信号输出，因此示波器上也会出现） |
 
 ---
 
@@ -117,7 +112,7 @@ python verify_waveform_picture.py --input myshot.png --bins 192 --gamma 1.6
 - `waveform.png` — 模拟示波器视图（**隐藏画面在这里**）
 - `preview.png` — 三联对比图
 
-命令行参数与 DCTL 的 UI 参数一一对应：`--bins --rowsub --gamma --exposure --outgamma --invert --flipx --flipy --mix`。
+命令行参数与 DCTL 的 UI 参数一一对应：`--bins --rowsub --gamma --exposure --mix`。
 
 脚本使用 float64，而 GPU 是 float32 —— 涉及数值精度的改动仍需在 Resolve 里实机确认。
 
@@ -133,6 +128,6 @@ python verify_waveform_picture.py --input myshot.png --bins 192 --gamma 1.6
 
 ## 已知特性
 
-- **全黑列**：整列亮度为 0（或 invert 后为 0）时无法构造分布，此时均匀铺满该列，避免示波器上出现一根刺眼的亮线
+- **全黑列**：整列亮度为 0 时无法构造分布，此时均匀铺满该列，避免示波器上出现一根刺眼的亮线
 - **逐帧稳定**：只依赖坐标，不含时间项，所以静帧不会闪烁；视频逐帧变化仅来自素材本身
 - **色度示波器无意义**：输出是纯灰度，请使用 Waveform 的 **Luma** 模式（Parade 下 R/G/B 三条曲线完全相同）

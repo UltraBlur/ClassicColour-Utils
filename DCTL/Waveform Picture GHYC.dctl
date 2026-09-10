@@ -32,12 +32,7 @@ DEFINE_UI_PARAMS(bins,     Histogram Bins,       DCTLUI_SLIDER_INT, 128, 16, 256
 DEFINE_UI_PARAMS(rowsub,   Row Samples,          DCTLUI_SLIDER_INT, 2, 1, 4, 1)
 DEFINE_UI_PARAMS(gamma,    Dot Contrast,         DCTLUI_SLIDER_FLOAT, 1.8, 0.2, 3.0, 0.05)
 DEFINE_UI_PARAMS(exposure, Exposure,             DCTLUI_SLIDER_FLOAT, 1.0, 0.1, 3.0, 0.05)
-DEFINE_UI_PARAMS(outgamma, Output Gamma,         DCTLUI_SLIDER_FLOAT, 1.0, 0.5, 2.5, 0.05)
 DEFINE_UI_PARAMS(mix,      Reveal Original,      DCTLUI_SLIDER_FLOAT, 0.0, 0.0, 1.0, 0.01)
-DEFINE_UI_PARAMS(invert,   Invert Picture,       DCTLUI_SLIDER_INT, 0, 0, 1, 1)
-DEFINE_UI_PARAMS(flipy,    Flip Vertical,        DCTLUI_SLIDER_INT, 0, 0, 1, 1)
-DEFINE_UI_PARAMS(flipx,    Flip Horizontal,      DCTLUI_SLIDER_INT, 0, 0, 1, 1)
-DEFINE_UI_PARAMS(grid,     Scope Graticule,      DCTLUI_SLIDER_INT, 0, 0, 1, 1)
 // clang-format on
 
 __DEVICE__ float3 get_color(int p_X, int p_Y, __TEXTURE__ p_TexR, __TEXTURE__ p_TexG, __TEXTURE__ p_TexB) {
@@ -48,9 +43,6 @@ __DEVICE__ float3 get_color(int p_X, int p_Y, __TEXTURE__ p_TexR, __TEXTURE__ p_
 }
 
 __DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, __TEXTURE__ p_TexR, __TEXTURE__ p_TexG, __TEXTURE__ p_TexB) {
-    // 采样列号(支持水平镜像, 隐藏画面可以镜像)
-    int sx = (flipx == 1) ? (p_Width - 1 - p_X) : p_X;
-
     // ---- Pass 1: 采样本列亮度剖面 w[j], j=0 对应画面最上一行 ----
     // 每个 bin 内做 rowsub 次盒式平均, 抑制细密横向条纹的混叠
     float prof[256];  // 滑块上限 256, 与数组尺寸一致
@@ -62,12 +54,11 @@ __DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, __TEXTU
             int sy = (int)(((float)j + ((float)s + 0.5f) / (float)rowsub) * binh);
             if (sy > p_Height - 1) sy = p_Height - 1;
             if (sy < 0) sy = 0;
-            float3 c = get_color(sx, sy, p_TexR, p_TexG, p_TexB);
+            float3 c = get_color(p_X, sy, p_TexR, p_TexG, p_TexB);
             acc += 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;  // Rec.709 luma
         }
         float w = _fminf(1.0f, _fmaxf(0.0f, acc / (float)rowsub) * exposure);
         w = _powf(w, gamma);
-        if (invert == 1) w = 1.0f - w;
         prof[j] = w;
         total += w;
     }
@@ -94,33 +85,20 @@ __DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, __TEXTU
             }
         }
     } else {
-        // 整列剖面为零(全黑或反相后全黑): 均匀铺满, 避免示波器上出现一根亮线
+        // 整列剖面为零(全黑): 均匀铺满, 避免示波器上出现一根亮线
         pos = u;
     }
 
     // ---- 行位置 → 信号电平。电平 1.0(顶部)对应画面最上一行 => 画面正立 ----
-    float level = (flipy == 1) ? pos : (1.0f - pos);
-    level = _fmaxf(0.0f, _fminf(1.0f, level));
-    float val = _powf(level, outgamma);
+    float level = _fmaxf(0.0f, _fminf(1.0f, 1.0f - pos));
 
     // ---- 灰度输出; Reveal 渐变回原图(混合后示波器上画面逐渐融化) ----
-    float3 rgb = make_float3(val, val, val);
+    float3 rgb = make_float3(level, level, level);
     if (mix > 0.0f) {
         float3 src = get_color(p_X, p_Y, p_TexR, p_TexG, p_TexB);
         rgb.x = mix * src.x + (1.0f - mix) * rgb.x;
         rgb.y = mix * src.y + (1.0f - mix) * rgb.y;
         rgb.z = mix * src.z + (1.0f - mix) * rgb.z;
-    }
-
-    // ---- 仿示波器刻度线(可选; 会作为信号输出, 因此示波器上也会出现) ----
-    if (grid == 1) {
-        float gy = ((float)p_Y + 0.5f) / (float)p_Height;
-        float gx = ((float)p_X + 0.5f) / (float)p_Width;
-        float dy = _fabs(gy * 4.0f - _round(gy * 4.0f)) / 4.0f * (float)p_Height;
-        float dx = _fabs(gx * 10.0f - _round(gx * 10.0f)) / 10.0f * (float)p_Width;
-        if (dy < 0.8f || dx < 0.8f) {
-            rgb = make_float3(0.10f, 0.10f, 0.10f);
-        }
     }
 
     return rgb;

@@ -10,8 +10,7 @@ Waveform Picture 验证 / 预览工具
 
 用法:
   python verify_waveform_picture.py [--input 图.png] [--bins 128] [--rowsub 2]
-        [--gamma 1.8] [--exposure 1.0] [--outgamma 1.0] [--invert]
-        [--flipx] [--flipy] [--mix 0.0] [--outdir preview]
+        [--gamma 1.8] [--exposure 1.0] [--mix 0.0] [--outdir preview]
 
 不带 --input 时: 优先使用 Windows 自带壁纸(真实照片), 否则生成合成人脸测试图。
 """
@@ -68,23 +67,17 @@ def make_synthetic_face(w=640, h=480):
 # --------------------------------------------------------------------------
 # DCTL 算法模拟(Waterfall / 顺排): 输入 RGB float [0,1] -> 输出灰度 float [0,1]
 # --------------------------------------------------------------------------
-def encode_dctl(img, bins=128, rowsub=2, gamma=1.8, exposure=1.0,
-                outgamma=1.0, invert=False, flipx=False, flipy=False, mix=0.0):
+def encode_dctl(img, bins=128, rowsub=2, gamma=1.8, exposure=1.0, mix=0.0):
     h, w, _ = img.shape
     luma = img @ LUMA  # (H, W)
-
-    # 采样列号: flipx 镜像的是"采样列", 与 DCTL 一致
-    sx = (w - 1 - np.arange(w)) if flipx else np.arange(w)
 
     # ---- Pass 1: 各列亮度剖面 prof[x, j], 每 bin 做 rowsub 次盒式平均 ----
     binh = h / bins
     j = np.arange(bins)[:, None]
     s = np.arange(rowsub)[None, :]
     rows = np.clip(((j + (s + 0.5) / rowsub) * binh).astype(int), 0, h - 1)  # (bins, rowsub)
-    prof = luma[rows][:, :, sx].mean(axis=1).T  # (W, bins)
+    prof = luma[rows].mean(axis=1).T  # (W, bins)
     w_ = np.clip(prof * exposure, 0.0, 1.0) ** gamma
-    if invert:
-        w_ = 1.0 - w_
     total = w_.sum(axis=1)  # (W,)
 
     # ---- u: 采样位置 = 行位置(自上而下) => 顺排/瀑布。与 DCTL 一致 ----
@@ -106,11 +99,8 @@ def encode_dctl(img, bins=128, rowsub=2, gamma=1.8, exposure=1.0,
     if zero_cols.any():
         pos[zero_cols, :] = u[None, :]
 
-    # ---- 电平映射(默认正立) + 输出 gamma + 灰度 ----
-    level = pos if flipy else (1.0 - pos)
-    level = np.clip(level, 0.0, 1.0)
-    if outgamma != 1.0:
-        level = level ** outgamma
+    # ---- 电平映射(电平 1.0 顶部对应画面最上一行 => 正立) + 灰度 ----
+    level = np.clip(1.0 - pos, 0.0, 1.0)
     out = np.repeat(level.T[:, :, None], 3, axis=2)  # (H, W, 3)
 
     # ---- Reveal 混合 ----
@@ -154,10 +144,6 @@ def main():
     ap.add_argument("--rowsub", type=int, default=2, help="每 bin 的行采样数(盒式平均)")
     ap.add_argument("--gamma", type=float, default=1.8)
     ap.add_argument("--exposure", type=float, default=1.0)
-    ap.add_argument("--outgamma", type=float, default=1.0)
-    ap.add_argument("--invert", action="store_true")
-    ap.add_argument("--flipx", action="store_true")
-    ap.add_argument("--flipy", action="store_true")
     ap.add_argument("--mix", type=float, default=0.0)
     ap.add_argument("--outdir", default="preview")
     args = ap.parse_args()
@@ -185,14 +171,11 @@ def main():
 
     h, w, _ = img.shape
     print(f"编码参数: bins={args.bins} rowsub={args.rowsub} "
-          f"gamma={args.gamma} exposure={args.exposure} outgamma={args.outgamma} "
-          f"invert={args.invert} flipx={args.flipx} flipy={args.flipy} mix={args.mix}")
+          f"gamma={args.gamma} exposure={args.exposure} mix={args.mix}")
 
     # ---- 编码(即 DCTL 输出) ----
     out = encode_dctl(img, bins=args.bins, rowsub=args.rowsub, gamma=args.gamma,
-                      exposure=args.exposure, outgamma=args.outgamma,
-                      invert=args.invert, flipx=args.flipx, flipy=args.flipy,
-                      mix=args.mix)
+                      exposure=args.exposure, mix=args.mix)
     gray = out @ LUMA
 
     # ---- 模拟示波器 ----
