@@ -1,0 +1,124 @@
+// ============================================================================
+//  Rec2020   (Rec.2020 / BT.2020 (D65))
+//  by GHYC  —— 由 tools/generate_dctl.py 从 MCGD_List.json 自动生成
+//
+//  基色 / 白点 (CIE 1931 xy):
+//    R: (0.7080, 0.2920)     G: (0.1700, 0.7970)     B: (0.1310, 0.0460)
+//    W: (0.3127, 0.3290)     @ Y = 1.0
+//
+//  做什么 (What it does)
+//     mode = 0 (RGB -> XYZ): 输入视为该空间的线性 RGB, 输出 XYZ(三值落在 R/G/B 通道)
+//     mode = 1 (XYZ -> RGB): 输入视为 XYZ, 输出该空间的线性 RGB
+//
+//  原理 (How it works)
+//     基色色度 (x_i, y_i, z_i=1-x_i-y_i); 方向矩阵
+//        P = [ rx/ry  gx/gy  bx/by ]
+//            [   1      1      1   ]
+//            [ zr/ry  zg/gy  zb/by ]
+//     解 P*(Yr,Yg,Yb) = whiteXYZ(白点亮 Y=wl) 得各色亮度贡献, 于是:
+//        RGB->XYZ = P * diag(Yr,Yg,Yb)      XYZ->RGB = diag(1/Yr,1/Yg,1/Yb) * P^-1
+//     白点取 whiteXYZ = wl*(wx/wy, 1, zw/wy), wl 为白点亮度(默认 1.0)。
+//
+//  注意: 只做线性矩阵运算, 不做编码(Log/伽马)转换; 输入应视为线性 RGB。
+//  XYZ 是"末级"三刺激值, 放进 RGB 通道是为表达转换结果, 显示层面需下游处理。
+//  如需预览安全, 可开启 Clip(默认开); 关掉则保留负值/超白(出域颜色)。
+// ============================================================================
+
+// clang-format off
+DEFINE_UI_PARAMS(mode,   Direction,       DCTLUI_COMBO_BOX,   0,   {TO_XYZ, TO_RGB}, {RGB to XYZ, XYZ to RGB})
+DEFINE_UI_PARAMS(rx,     Red x,           DCTLUI_SLIDER_FLOAT, 0.7080, 0.0, 1.0, 0.0001)
+DEFINE_UI_PARAMS(ry,     Red y,           DCTLUI_SLIDER_FLOAT, 0.2920, 0.0, 1.0, 0.0001)
+DEFINE_UI_PARAMS(gx,     Green x,         DCTLUI_SLIDER_FLOAT, 0.1700, 0.0, 1.0, 0.0001)
+DEFINE_UI_PARAMS(gy,     Green y,         DCTLUI_SLIDER_FLOAT, 0.7970, 0.0, 1.0, 0.0001)
+DEFINE_UI_PARAMS(bx,     Blue x,          DCTLUI_SLIDER_FLOAT, 0.1310, 0.0, 1.0, 0.0001)
+DEFINE_UI_PARAMS(by,     Blue y,          DCTLUI_SLIDER_FLOAT, 0.0460, 0.0, 1.0, 0.0001)
+DEFINE_UI_PARAMS(wx,     White x,         DCTLUI_SLIDER_FLOAT, 0.3127, 0.0, 1.0, 0.0001)
+DEFINE_UI_PARAMS(wy,     White y,         DCTLUI_SLIDER_FLOAT, 0.3290, 0.0, 1.0, 0.0001)
+DEFINE_UI_PARAMS(wl,     White Luminance, DCTLUI_SLIDER_FLOAT, 1.0,   0.001, 100.0, 0.001)
+DEFINE_UI_PARAMS(clip,   Clip,            DCTLUI_COMBO_BOX,   1,   {NO_CLIP, CLIP}, {No, Yes})
+// clang-format on
+
+__DEVICE__ float3 get_color(int p_X, int p_Y, __TEXTURE__ p_TexR, __TEXTURE__ p_TexG, __TEXTURE__ p_TexB) {
+    float r = _tex2D(p_TexR, p_X, p_Y);
+    float g = _tex2D(p_TexG, p_X, p_Y);
+    float b = _tex2D(p_TexB, p_X, p_Y);
+    return make_float3(r, g, b);
+}
+
+__DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, __TEXTURE__ p_TexR, __TEXTURE__ p_TexG, __TEXTURE__ p_TexB) {
+    float3 in = get_color(p_X, p_Y, p_TexR, p_TexG, p_TexB);
+
+    // ---- 基色 z + 经分母安全处理的方向矩阵元素 (P 的第 2 行 d=e=f=1) ----
+    float zr = 1.0f - rx - ry;
+    float zg = 1.0f - gx - gy;
+    float zb = 1.0f - bx - by;
+    float zw = 1.0f - wx - wy;
+
+    float ry_s = _fmaxf(ry, 1e-6f);
+    float gy_s = _fmaxf(gy, 1e-6f);
+    float by_s = _fmaxf(by, 1e-6f);
+    float wy_s = _fmaxf(wy, 1e-6f);
+
+    float a = rx / ry_s;  // P[0][0]
+    float b = gx / gy_s;  // P[0][1]
+    float c = bx / by_s;  // P[0][2]
+    float g = zr / ry_s;  // P[2][0]
+    float h = zg / gy_s;  // P[2][1]
+    float i = zb / by_s;  // P[2][2]
+
+    // ---- P 的伴随矩阵 / 行列式 => P^-1 = adj(P) / det ----
+    float det = a * (i - h) - b * (i - g) + c * (h - g);
+    if (_fabs(det) < 1e-9f) det = (det < 0.0f) ? -1e-9f : 1e-9f;  // 防除零
+
+    float C11 = i - h;
+    float C12 = g - i;
+    float C13 = h - g;
+    float C21 = c * h - b * i;
+    float C22 = a * i - c * g;
+    float C23 = b * g - a * h;
+    float C31 = b - c;
+    float C32 = c - a;
+    float C33 = a - b;
+
+    float iP00 = C11 / det, iP01 = C21 / det, iP02 = C31 / det;
+    float iP10 = C12 / det, iP11 = C22 / det, iP12 = C32 / det;
+    float iP20 = C13 / det, iP21 = C23 / det, iP22 = C33 / det;
+
+    // ---- 白点 XYZ (Y = wl) ----
+    float W0 = wl * (wx / wy_s);
+    float W1 = wl;
+    float W2 = wl * (zw / wy_s);
+
+    // ---- 亮度贡献 Yr,Yg,Yb = P^-1 * whiteXYZ ----
+    float Yr = iP00 * W0 + iP01 * W1 + iP02 * W2;
+    float Yg = iP10 * W0 + iP11 * W1 + iP12 * W2;
+    float Yb = iP20 * W0 + iP21 * W1 + iP22 * W2;
+    if (_fabs(Yr) < 1e-8f) Yr = (Yr < 0.0f) ? -1e-8f : 1e-8f;
+    if (_fabs(Yg) < 1e-8f) Yg = (Yg < 0.0f) ? -1e-8f : 1e-8f;
+    if (_fabs(Yb) < 1e-8f) Yb = (Yb < 0.0f) ? -1e-8f : 1e-8f;
+
+    float outx, outy, outz;
+
+    if (mode == 0) {
+        // RGB -> XYZ : M = P * diag(Yr,Yg,Yb), 主行全部乘以对应 Y
+        outx = Yr * a * in.x + Yg * b * in.y + Yb * c * in.z;
+        outy = Yr * in.x     + Yg * in.y     + Yb * in.z;
+        outz = Yr * g * in.x + Yg * h * in.y + Yb * i * in.z;
+    } else {
+        // XYZ -> RGB : 先 inv(P) 乘输入, 再除以各自的 Y
+        float tx = iP00 * in.x + iP01 * in.y + iP02 * in.z;
+        float ty = iP10 * in.x + iP11 * in.y + iP12 * in.z;
+        float tz = iP20 * in.x + iP21 * in.y + iP22 * in.z;
+        outx = tx / Yr;
+        outy = ty / Yg;
+        outz = tz / Yb;
+    }
+
+    if (clip == 1) {
+        outx = _fminf(1.0f, _fmaxf(0.0f, outx));
+        outy = _fminf(1.0f, _fmaxf(0.0f, outy));
+        outz = _fminf(1.0f, _fmaxf(0.0f, outz));
+    }
+
+    return make_float3(outx, outy, outz);
+}

@@ -10,7 +10,7 @@ Waveform Picture 验证 / 预览工具
 
 用法:
   python verify_waveform_picture.py [--input 图.png] [--bins 128] [--rowsub 2]
-        [--gamma 1.8] [--exposure 1.0] [--mix 0.0] [--outdir preview]
+        [--gamma 1.8] [--exposure 1.0] [--mix 0.0] [--outdir ../preview]
 
 不带 --input 时: 优先使用 Windows 自带壁纸(真实照片), 否则生成合成人脸测试图。
 """
@@ -67,11 +67,15 @@ def make_synthetic_face(w=640, h=480):
 # --------------------------------------------------------------------------
 # DCTL 算法模拟(Waterfall / 顺排): 输入 RGB float [0,1] -> 输出灰度 float [0,1]
 # --------------------------------------------------------------------------
-def encode_dctl(img, bins=128, rowsub=2, gamma=1.8, exposure=1.0, mix=0.0):
+def encode_dctl(img, bins=128, rowsub=2, gamma=1.8, exposure=1.0, mix=0.0, mono=False):
     h, w, _ = img.shape
+    if mono:  # 与 DCTL get_color 一致: 先 Rec.709 转灰度
+        luma_img = img @ LUMA
+        img = np.repeat(luma_img[:, :, None], 3, axis=2)
     luma = img @ LUMA  # (H, W)
 
     # ---- Pass 1: 各列亮度剖面 prof[x, j], 每 bin 做 rowsub 次盒式平均 ----
+    bins = min(bins, h)  # 与 DCTL 的 bnh 一致: 采样数不超画面高度
     binh = h / bins
     j = np.arange(bins)[:, None]
     s = np.arange(rowsub)[None, :]
@@ -145,7 +149,8 @@ def main():
     ap.add_argument("--gamma", type=float, default=1.8)
     ap.add_argument("--exposure", type=float, default=1.0)
     ap.add_argument("--mix", type=float, default=0.0)
-    ap.add_argument("--outdir", default="preview")
+    ap.add_argument("--mono", action="store_true", help="先 Rec.709 转灰度(与 DCTL Convert to B&W 一致)")
+    ap.add_argument("--outdir", default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "preview"))
     args = ap.parse_args()
 
     # ---- 输入 ----
@@ -175,7 +180,7 @@ def main():
 
     # ---- 编码(即 DCTL 输出) ----
     out = encode_dctl(img, bins=args.bins, rowsub=args.rowsub, gamma=args.gamma,
-                      exposure=args.exposure, mix=args.mix)
+                      exposure=args.exposure, mix=args.mix, mono=args.mono)
     gray = out @ LUMA
 
     # ---- 模拟示波器 ----

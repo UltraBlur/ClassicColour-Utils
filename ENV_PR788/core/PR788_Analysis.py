@@ -15,16 +15,17 @@ tristimulus integration, and adds:
 Conventions
 -----------
 These are *emitted-light* spectra (relative SPDs), so all color differences are
-computed on **chromaticity only**: each spectrum is normalized to unit *Y*
-before Lab and to *Y* = 100 before ICtCp. Two measurements of the same source at
-different gain therefore compare as the same colour. Absolute luminance (the raw
-*Y* in the 683 lm/W scale) is still carried on each :class:`Spectrum` so callers
-can show it separately.
+computed on **chromaticity only**: each spectrum is normalized to unit *Y* before
+Lab and before ICtCp. Two measurements of the same source at different gain
+therefore compare as the same colour. Absolute luminance (the raw *Y* in the
+683 lm/W scale) is still carried on each :class:`Spectrum` so callers can show
+it separately.
 
-Note on ITP: the installed ``colour`` build's ``delta_E_ITP`` implements
-ITU-R BT.2124 (the T channel is halved). ITU-T P.143 ITP does not halve T. Both
-are computed here directly from the verified ICtCp matrix so the two figures can
-be shown side by side.
+Note on ITP: both variants are computed from the same colour-science
+``XYZ_to_ICtCp`` encoding (ITU-R BT.2100 PQ, D65-adapted), normalised to unit
+Y so the metric is chromaticity-only. The difference is only in the *T*
+channel: ITU-R BT.2124 halves ``delta_T`` (matches
+``colour.difference.delta_E_ITP`` exactly) while ITU-T P.143 does not.
 """
 from __future__ import annotations
 
@@ -43,16 +44,6 @@ K = 683.0
 
 #: Visible span used for the CIE 1931 chromaticity-diagram (gamut) reference.
 VISIBLE_RANGE = (380, 780)
-
-#: CIE XYZ (Y = 100) -> ICtCp, ITU-R BT.2124 / ITU-T P.143. Verified: D65
-#: (95.047, 100, 108.883) maps to I' = 207.196 (literature 207.19).
-_XYZ_TO_ICTCP = np.array(
-    [
-        [0.409619125403, 1.668425812597, 0.013042499109],
-        [-0.071683130767, -1.004058663239, 2.513144105036],
-        [-0.082143903925, 0.998154892010, -0.254967111700],
-    ]
-)
 
 
 # --------------------------------------------------------------------------- #
@@ -73,7 +64,7 @@ class Spectrum:
     u_prime: float
     v_prime: float
     lab: np.ndarray  # (3,) chromaticity Lab (Y normalized to 1)
-    ictcp: np.ndarray  # (3,) ICtCp (Y normalized to 100)
+    ictcp: np.ndarray  # (3,) ICtCp (unit-Y, colour-science PQ encoding)
 
 
 def _xyz_to_lab_unit_y(xyz: np.ndarray) -> np.ndarray:
@@ -85,12 +76,25 @@ def _xyz_to_lab_unit_y(xyz: np.ndarray) -> np.ndarray:
     return np.asarray(colour.XYZ_to_Lab(xyz / xyz[1]), dtype=float)
 
 
-def _xyz_to_ictcp_unit_y100(xyz: np.ndarray) -> np.ndarray:
-    """ICtCp for a light source: normalize Y to 100, apply the BT.2124 matrix."""
+def _xyz_to_ictcp_unit(xyz: np.ndarray) -> np.ndarray:
+    """ICtCp for a light source: normalize to unit Y, then encode with
+    colour-science's ``XYZ_to_ICtCp`` (ITU-R BT.2100 PQ, D65-adapted).
+
+    Normalizing to unit Y makes the metric chromaticity-only (light-source
+    colour, not luminance) and the output is exactly what
+    ``colour.difference.delta_E_ITP`` consumes, so the BT.2124 figure matches
+    that reference implementation bit-for-bit. Returned I' is in [0, 1]
+    (a D65 source is ≈ 0.15).
+
+    This replaces the original hand-rolled ``_XYZ_TO_ICTCP`` linear matrix,
+    which was wrong: it treated xy ≈ (0.79, 0.08) as neutral, so near-neutral
+    light sources got huge bogus chroma (D65 -> T' ≈ 166) and ΔE_ITP was
+    inflated ~2000x.
+    """
     xyz = np.asarray(xyz, dtype=float)
     if xyz[1] <= 0:
         raise ValueError("Spectrum has non-positive Y; cannot derive ICtCp.")
-    return _XYZ_TO_ICTCP @ (xyz * 100.0 / xyz[1])
+    return np.asarray(colour.XYZ_to_ICtCp(xyz / xyz[1]), dtype=float)
 
 
 def load_spectrum(csv_path: str, name: Optional[str] = None) -> Spectrum:
@@ -122,7 +126,7 @@ def load_spectrum(csv_path: str, name: Optional[str] = None) -> Spectrum:
         u_prime=float(4 * xyz[0] / denom),
         v_prime=float(9 * xyz[1] / denom),
         lab=_xyz_to_lab_unit_y(xyz),
-        ictcp=_xyz_to_ictcp_unit_y100(xyz),
+        ictcp=_xyz_to_ictcp_unit(xyz),
     )
 
 

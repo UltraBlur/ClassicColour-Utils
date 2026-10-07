@@ -1,12 +1,12 @@
 # Waveform Picture — 藏在示波器里的画面
 
-一个"好玩"的 DaVinci Resolve DCTL：**画面本身变成灰度瀑布条纹，但在示波器（Waveform / Luma）上看，显示的却是原始画面。**
+一个"好玩"的 DaVinci Resolve DCTL：**画面本身变成（灰度/彩色）瀑布条纹，但在示波器上看，显示的却是原始画面。** 支持两种模式：**Luma**（单通道，Waveform+Luma）与 **RGB Parade**（三通道，三块面板合成彩色）。
 
 | 左：原图 | 中：DCTL 输出（时间线上看到的） | 右：示波器里看到的 |
 |---|---|---|
 | 正常彩色画面 | 灰度"瀑布"条纹 | 原始画面重现 |
 
-预览图见 `preview/preview.png`（由验证脚本生成）。
+预览图见 `preview/preview.png`（Luma）与 `preview/preview_rgb.png`（RGB Parade），均由验证脚本生成。
 
 ---
 
@@ -70,8 +70,10 @@ D(x, h) = count{ y : L(x, y) ≈ h }
 1. Color 页面新建一个 Serial Node
 2. Effects → ResolveFX Color → **DCTL**，拖到该节点
 3. 在 DCTL List 下拉里选 **Waveform Picture GHYC**
-4. **打开示波器**：右上角 Scopes 按钮 → 选择 **Waveform**，模式设为 **Luma**（或按 Y 通道显示）
-5. 此时时间线画面是灰度条纹瀑布，而示波器里显示的是原画面 🎉
+4. **打开示波器**：右上角 Scopes 按钮 → 选择 **Waveform**；再按 DCTL 的 **Color Mode** 下拉框选观看模式：
+   - **Luma**：示波器模式设为 **Luma**（或按 Y 通道显示）→ 看到灰度隐藏画面
+   - **RGB Parade**：示波器模式设为 **RGB Parade** → 三块面板分别还原红/绿/蓝，合成彩色原图
+5. 此时时间线画面是灰度（或彩色）瀑布条纹，而示波器里显示的是原画面 🎉
 
 > ⚠️ 直接看输出画面只会看到条纹。**必须配合示波器观看**，这就是这个效果的全部乐趣所在。
 
@@ -79,6 +81,7 @@ D(x, h) = count{ y : L(x, y) ≈ h }
 - 示波器窗口拉到最大，效果最清楚
 - 原素材对比度高、主体明确时效果最好（人像、剪影、Logo）
 - 若示波器显示偏暗/偏平，调 `Exposure` 与 `Dot Contrast`
+- 想彻底去色（把 Reveal 原图也变黑白）时，把 `Convert to B&W` 设为 **B&W**
 
 ---
 
@@ -86,31 +89,36 @@ D(x, h) = count{ y : L(x, y) ≈ h }
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| **Histogram Bins** | 128 | 隐藏画面的**垂直分辨率**（电平轴方向）。越大越细腻，但每像素采样数线性增加。128–192 是画质/速度的甜点，上限 256 |
+| **Color Mode（下拉框）** | Luma | **Luma** = 单通道加权亮度（WAVEFORM+LUMA 显灰度画面）；**RGB Parade** = R/G/B 三通道独立逆 CDF（三块面板合成彩色）。默认 Luma |
+| **Convert to B&W（下拉框）** | Color | **Color** = 保留彩色；**B&W** = 一开始就用 Rec.709 矩阵（L=0.2126R+0.7152G+0.0722B）把素材转成灰度。Luma / RGB / Reveal 三处统一生效。Luma 模式下本就灰度、无差异；RGB Parade 下会把彩色瀑布与 Reveal 原图一起变黑白 |
+| **Histogram Bins** | 128 | 隐藏画面的**垂直分辨率**（电平轴方向）。越大越细腻，但每像素采样数线性增加，且受画面高度与示波器显示分辨率限制——超过画面高度就采不到新信息。上限 1024 |
 | **Row Samples** | 2 | 每个 bin 内的行采样数（盒式平均）。1 = 点采样（快，但细密横向纹理会混叠）；2–4 = 抗混叠，隐藏画面更干净 |
 | **Dot Contrast** | 1.8 | 对亮度剖面加 gamma。调大 → 暗部更疏、亮部更密，隐藏画面对比度更高（默认 1.8 比传统 1.3 更能撑开暗部细节） |
 | **Exposure** | 1.0 | 剖面整体增益。原片偏暗时调大 |
-| **Reveal Original** | 0.0 | 与原图混合。从 0 拉到 1，画面从条纹渐变回原片，示波器上的隐藏画面同步"融化"——很适合做转场 |
+| **Reveal Original** | 0.0 | 与原图混合，范围 **-1..1**。\|mix\| 为显现量：0=条纹，+1=原图正立；-1=示波器上画面**倒立**（通过反相信号实现，不是翻行号）。很适合做转场 |
 
 ---
 
 ## 本地验证（无需 Resolve）
 
-`verify_waveform_picture.py` 在 numpy 中**完整复现** DCTL 算法，并模拟波形监视器渲染，可以在打开 Resolve 之前先确认效果：
+验证脚本统一放在 `tools/` 下。`tools/verify_waveform_picture.py` 在 numpy 中**完整复现** DCTL 算法（Luma 模式），并模拟波形监视器渲染，可以在打开 Resolve 之前先确认效果：
 
 ```bash
 # 默认：自动使用系统壁纸，参数与 DCTL 默认值一致
-python verify_waveform_picture.py
+python tools/verify_waveform_picture.py
 
 # 指定图片与参数
-python verify_waveform_picture.py --input myshot.png --bins 192 --gamma 1.6
+python tools/verify_waveform_picture.py --input myshot.png --bins 192 --gamma 1.6
 ```
 
-输出到 `preview/`：
+RGB Parade 模式用 `tools/verify_waveform_picture_rgb.py`（额外生成 `preview_rgb.png` 三联/四联对比图）。
+
+输出到 `preview/`（相对 `tools/` 的上级目录）：
 
 - `encoded.png` — DCTL 节点会产出的画面
 - `waveform.png` — 模拟示波器视图（**隐藏画面在这里**）
 - `preview.png` — 三联对比图
+- `preview_rgb.png` — RGB Parade 四联对比图
 
 命令行参数与 DCTL 的 UI 参数一一对应：`--bins --rowsub --gamma --exposure --mix`。
 
@@ -129,5 +137,6 @@ python verify_waveform_picture.py --input myshot.png --bins 192 --gamma 1.6
 ## 已知特性
 
 - **全黑列**：整列亮度为 0 时无法构造分布，此时均匀铺满该列，避免示波器上出现一根刺眼的亮线
+- **平坦区竖纹（Waterfall 自带）**：每列输出都铺满整个电平轴，画面平滑/低细节的区域会裸露出列结构，示波器上出现细密竖纹。用 **Dot Contrast** 调大、**Exposure** 调低可压暗平坦区让竖纹淡出；`Bins` 只影响垂直（电平）方向，无法消除这类竖纹
 - **逐帧稳定**：只依赖坐标，不含时间项，所以静帧不会闪烁；视频逐帧变化仅来自素材本身
 - **色度示波器无意义**：输出是纯灰度，请使用 Waveform 的 **Luma** 模式（Parade 下 R/G/B 三条曲线完全相同）

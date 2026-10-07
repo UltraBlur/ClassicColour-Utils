@@ -1,0 +1,152 @@
+// ============================================================================
+//  ICtCp <-> RGB(BT.2020)  (Dolby Vision / BT.2100 ICtCp 矩阵部分)
+//  by GHYC
+//
+// 做什么 (What it does)
+//  -------------------
+//  ICtCp 编码链路一共三段:
+//    RGB(2020,linear) --M1--> LMS(linear) --PQ编码--> L'M'S'(PQ) --M2--> ICtCp
+//  中间的 PQ 编码/解码(非线性)交给 Resolve 自带的 CST 节点完成, 本节点只做
+//  两侧的线性矩阵 M1 / M2(及其逆), 通过 Stage 下拉框选择当前处于哪一段:
+//
+//    Stage 0  RGB(2020 linear) -> LMS(linear)         [encode, 送入 CST 之前]
+//    Stage 1  L'M'S'(PQ)       -> ICtCp               [encode, CST(Linear->PQ) 之后]
+//    Stage 2  ICtCp            -> L'M'S'(PQ)          [decode, 送入 CST(PQ->Linear) 之前]
+//    Stage 3  LMS(linear)      -> RGB(2020 linear)     [decode, CST 之后]
+//
+//  典型串接(解码 ICtCp -> RGB, 即 Dolby Vision Profile 5 常见需求):
+//    [本节点 Stage 2] -> [CST: PQ -> Linear] -> [本节点 Stage 3]
+//  编码方向反过来串:
+//    [本节点 Stage 0] -> [CST: Linear -> PQ] -> [本节点 Stage 1]
+//
+// 原理 (How it works)
+//  -------------------
+//  M1 (RGB2020 linear -> LMS, BT.2100 定义, 系数分母 4096):
+//      L = ( 1688 R + 2146 G +  262 B) / 4096
+//      M = (  683 R + 2951 G +  462 B) / 4096
+//      S = (   99 R +  309 G + 3688 B) / 4096
+//  M2 (L'M'S'(PQ) -> ICtCp, BT.2100):
+//      I   = 0.5 L' + 0.5 M'
+//      Ct' = 1.613769531 L' - 3.323486328 M' + 1.709716797 S'
+//      Cp' = 4.378173828 L' - 4.245605469 M' - 0.132568359 S'
+//  Stage 2 / Stage 3 分别是 M2^-1 / M1^-1(数值矩阵, 编译期算好, 非逐像素求逆)。
+//
+//  Ct/Cp 的存储偏移 (Ct/Cp Offset 滑块): 矩阵算出来的 Ct'/Cp' 以 0 为中心
+//  (类似 YCbCr 的 Cb/Cr), 但实际存储在 0..1 缓冲区里的往往是加过偏移的版本,
+//  否则负值存不进无符号纹理。所以:
+//    Stage 1 (encode) 矩阵算完 Ct'/Cp' 之后再加 +ctcp_off 才是最终 ICtCp 输出
+//    Stage 2 (decode) 拿到的 Ct/Cp 必须先 -ctcp_off 还原成以 0 为中心再喂矩阵
+//  这个偏移量到底是多少取决于上游(DV 编码器/Resolve 的 DV 解码)用什么约定,
+//  我们的链路里无法先验确定, 因此暴露成滑块现场标定:
+//    中性灰(R=G=B)在 Stage2->CST->Stage3 之后应该解回中性灰。
+//    偏洋红/紫 -> 滑块调大; 偏绿 -> 滑块调小; 调到中性灰为止。
+//  两个典型取值:
+//    0.5  —— 上游按 DV/YCbCr 惯例存的是 +0.5 偏移版本 (默认值, 也是 DV 的标准约定)
+//    0.0  —— 上游已经给出以 0 为中心的 Ct/Cp (纯 BT.2100 数学定义)
+//  注意正反两向必须用同一个值: decode 用多少减, encode 就用多少加。
+//
+//  上游错误的 YCbCr->RGB (Undo YUV->RGB 开关, 默认开):
+//  DV5 的三通道本质是 I/Ct/Cp, 但素材进达芬奇(或经某些播放/转码链)时, 会被
+//  当成 YCbCr 又做了一次 YCbCr->RGB —— 相当于在 ICtCp 矩阵前面偷偷串了一个
+//  3x3, 三通道被彻底搅混。此时无论 Ct/Cp Offset 怎么调都救不回来(症状: 颜色
+//  始终不对, 且色偏不随偏移量线性改善)。本节点最前面因此加了一级反向还原:
+//  对输入做 RGB->YCbCr, 把 I/Ct/Cp 还原出来再做后面的 ICtCp 矩阵。
+//  上游用的系数/量程不确定, 所以暴露成两个下拉框现场试:
+//    YUV Matrix : Rec.709 / Rec.2020 NCL (DV5 信号按 BT.2020 标, 默认 Rec.2020)
+//    YUV Range  : Full / Video (上游是否做过 limited->full 展开; 默认 Full)
+//  编码方向(Stage 0/1)一般不需要, 请把 Undo YUV->RGB 设为 Off。
+//  这一级默认关闭: 若要在链路的不同位置(编码域/线性域)测试还原效果, 用独立节点
+//  `Undo YUV-RGB GHYC.dctl`, 它可以自由摆放在 CST 前后。两者不要同时开。
+//
+//  注意: ICtCp 的 LMS 基于 BT.2020 primaries 推导(Dolby Vision 各 Profile 固定
+//  用这组矩阵, 与内容实际 gamut 是否为 P3-D65 无关, gamut 差异由外部 metadata
+//  处理, 不体现在这层矩阵里)。Stage 1/2 的输入/输出都停留在 PQ 编码域, 不要在
+//  本节点内部做 PQ EOTF, 那一步必须交给 CST, 否则 Ct/Cp 色差通道会被错误地当
+//  成独立信号做非线性变换。
+// ============================================================================
+
+// clang-format off
+DEFINE_UI_PARAMS(stage,    Stage,         DCTLUI_COMBO_BOX,    2,   {STAGE0, STAGE1, STAGE2, STAGE3}, {0: RGB2020lin to LMSlin, 1: LMSpq to ICtCp, 2: ICtCp to LMSpq, 3: LMSlin to RGB2020lin})
+DEFINE_UI_PARAMS(undoyuv,  Undo YUV->RGB, DCTLUI_COMBO_BOX,    0,   {OFF, ON}, {Off, On})
+DEFINE_UI_PARAMS(yuvmat,   YUV Matrix,    DCTLUI_COMBO_BOX,    1,   {REC709, REC2020}, {Rec.709, Rec.2020 NCL})
+DEFINE_UI_PARAMS(yuvrange, YUV Range,     DCTLUI_COMBO_BOX,    0,   {FULL, VIDEO}, {Full, Video})
+DEFINE_UI_PARAMS(ctcp_off, Ct/Cp Offset,  DCTLUI_SLIDER_FLOAT, 0.5, -1.0, 1.0, 0.001)
+DEFINE_UI_PARAMS(clip,     Clip,          DCTLUI_COMBO_BOX,    0,   {NO_CLIP, CLIP}, {No, Yes})
+// clang-format on
+
+__DEVICE__ float3 get_color(int p_X, int p_Y, __TEXTURE__ p_TexR, __TEXTURE__ p_TexG, __TEXTURE__ p_TexB) {
+    float r = _tex2D(p_TexR, p_X, p_Y);
+    float g = _tex2D(p_TexG, p_X, p_Y);
+    float b = _tex2D(p_TexB, p_X, p_Y);
+    return make_float3(r, g, b);
+}
+
+// ---------------------------------------------------------------------------
+//  逆掉上游"错误的 YCbCr -> RGB"
+//  DV5 的三通道其实是 I/Ct/Cp, 但不少工具/播放链会把它当成 YCbCr 再做一次
+//  YCbCr->RGB, 等于在 ICtCp 矩阵前面偷偷串了一个 3x3, 结果是怎么调偏移都不对。
+//  这里对着 RGB 缓冲做一次 RGB->YCbCr, 把原始的三通道还原出来:
+//    yuvmat   : 上游用的是哪组系数 (0: Rec.709  |  1: Rec.2020 NCL)
+//    yuvrange : 上游是否做过 limited->full 展开 (1 = 做过, 这里反向压回 video 码值域)
+//  还原结果是"以 0.5 为中性"的 Y/Cb/Cr 存法, 正好对应 DV 的 I/Ct/Cp 存法。
+__DEVICE__ float3 undo_yuv_to_rgb(float3 c, int mat, int rng) {
+    float kr = (mat == 0) ? 0.2126f : 0.2627f;
+    float kb = (mat == 0) ? 0.0722f : 0.0593f;
+    float kg = 1.0f - kr - kb;
+
+    float y  = kr * c.x + kg * c.y + kb * c.z;
+    float cb = (c.z - y) / (2.0f * (1.0f - kb));
+    float cr = (c.x - y) / (2.0f * (1.0f - kr));
+
+    if (rng == 1) {
+        // full[0,1] -> 10bit video 码值域 (luma 64..940, chroma 以 512 为中心)
+        y  = y * (876.0f / 1023.0f) + (64.0f / 1023.0f);
+        cb = cb * (896.0f / 1023.0f);
+        cr = cr * (896.0f / 1023.0f);
+    }
+
+    return make_float3(y, cb + 0.5f, cr + 0.5f);
+}
+
+__DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, __TEXTURE__ p_TexR, __TEXTURE__ p_TexG, __TEXTURE__ p_TexB) {
+    float3 in = get_color(p_X, p_Y, p_TexR, p_TexG, p_TexB);
+    if (undoyuv == 1) {
+        in = undo_yuv_to_rgb(in, yuvmat, yuvrange);
+    }
+    float outx, outy, outz;
+
+    if (stage == 0) {
+        // M1: RGB(2020, linear) -> LMS(linear)
+        outx = (1688.0f * in.x + 2146.0f * in.y +  262.0f * in.z) / 4096.0f;
+        outy = ( 683.0f * in.x + 2951.0f * in.y +  462.0f * in.z) / 4096.0f;
+        outz = (  99.0f * in.x +  309.0f * in.y + 3688.0f * in.z) / 4096.0f;
+
+    } else if (stage == 1) {
+        // M2: L'M'S'(PQ) -> ICtCp, Ct/Cp 算完后 +ctcp_off 存回 0..1 缓冲区
+        outx =  0.5f         * in.x +  0.5f         * in.y +  0.0f         * in.z;
+        outy = (1.613769531f * in.x + -3.323486328f * in.y +  1.709716797f * in.z) + ctcp_off;
+        outz = (4.378173828f * in.x + -4.245605469f * in.y + -0.132568359f * in.z) + ctcp_off;
+
+    } else if (stage == 2) {
+        // M2^-1: ICtCp -> L'M'S'(PQ), 先把 Ct/Cp 的存储偏移减掉再乘逆矩阵
+        float ct = in.y - ctcp_off;
+        float cp = in.z - ctcp_off;
+        outx = 1.0f * in.x +  0.008609037014f * ct +  0.111029625016f * cp;
+        outy = 1.0f * in.x + -0.008609037014f * ct + -0.111029625016f * cp;
+        outz = 1.0f * in.x +  0.560031335741f * ct + -0.320627174976f * cp;
+
+    } else {
+        // M1^-1: LMS(linear) -> RGB(2020, linear)
+        outx =  3.436606694333f * in.x + -2.506452118656f * in.y +  0.069845424323f * in.z;
+        outy = -0.791329555599f * in.x +  1.983600451792f * in.y + -0.192270896193f * in.z;
+        outz = -0.025949899691f * in.x + -0.098913714712f * in.y +  1.124863614402f * in.z;
+    }
+
+    if (clip == 1) {
+        outx = _fminf(1.0f, _fmaxf(0.0f, outx));
+        outy = _fminf(1.0f, _fmaxf(0.0f, outy));
+        outz = _fminf(1.0f, _fmaxf(0.0f, outz));
+    }
+
+    return make_float3(outx, outy, outz);
+}

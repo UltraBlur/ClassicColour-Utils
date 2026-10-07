@@ -906,9 +906,9 @@ class SPDComparisonDialog(_AnalysisDialog):
         options_row.addWidget(export_button)
 
         note = QtWidgets.QLabel(
-            "ΔE metrics are chromaticity-based (each SPD normalized to unit Y). ITP is ITU's "
-            "display-oriented metric: absolute values are large for light sources; compare "
-            "BT.2124 (T halved) vs P.143 (no halving) relative behavior."
+            "ΔE metrics are chromaticity-based (each SPD normalized to unit Y). "
+            "BT.2124 (T halved) matches colour-science's delta_E_ITP; ITU-T P.143 is the "
+            "same ICtCp encoding without the T halving."
         )
         note.setProperty("muted", True)
         note.setWordWrap(True)

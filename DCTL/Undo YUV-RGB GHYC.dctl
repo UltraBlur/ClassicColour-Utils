@@ -1,0 +1,175 @@
+// ============================================================================
+//  Undo YUV-RGB  (把上游那次"错误的 YCbCr->RGB"逆掉, 或反过来施加)
+//  by GHYC
+//
+// 为什么需要它 (Why)
+//  -----------------
+//  DV5 的三通道本质是 I/Ct/Cp, 但素材进达芬奇(或经某些转码/播放链)时会被当成
+//  YCbCr 又做了一次 YCbCr->RGB —— 等于在 ICtCp 矩阵前面偷偷串了一个 3x3, 三通道
+//  被彻底搅混, 下游怎么调色都不对。本节点就是那一步的逆运算。
+//
+//  拆成独立节点的原因: 这次错误的转换到底发生在
+//     (a) 编码域 (PQ 码值域), 还是
+//     (b) 线性域 (上游先做了 PQ EOTF 再套矩阵)
+//  决定了 undo 也必须在同一个域里做, 否则逆不干净。同一份 DCTL 内部没法插入
+//  CST, 所以把它单独拿出来, 方便在链路里前后摆放试不同域。
+//
+// 做什么 (What it does)
+//  -------------------
+//  Direction = Undo   : 输入视为被错误转换过的 RGB, 做 RGB->YCbCr 还原出 Y/Cb/Cr
+//                       (输出色差通道带回 +0.5 偏移, 即 YCbCr 的存储惯例)
+//  Direction = Apply  : 输入视为 Y/Cb/Cr(带 +0.5 偏移), 做 YCbCr->RGB
+//                       (用于自检: Apply 之后再 Undo 应逐像素还原)
+//
+// 两套系数模型 (Coeff Model)
+//  -------------------------
+//  NCL (encoded) —— 默认, 编码域上的加权和, Y' = Kr·R' + Kg·G' + Kb·B'。
+//                   这是所有实际解码器(含达芬奇)的做法, 应优先试这个。
+//  CL approx (linear-light) —— 恒定亮度的等价近似: 先按 Transfer 把输入解到线性光,
+//                   在线性域做同一组加权和, 再按 Transfer 编回去。真正的 BT.2020 CL
+//                   还额外给色差配了一个专用 OETF(与亮度那个不是同一个函数), 这里
+//                   没有复现(拿不到规范原文), 所以这是个近似 —— 只用来回答
+//                   "上游那次转换到底发生在编码域还是线性域" 这个问题。
+//   注意: 两个模型用的是同一组 Kr/Kb, 区别只在"在哪个域上做矩阵"。所以
+//         Coeff Model = CL 且 Transfer = Identity 时, 与 NCL 完全等价(线性化是空操作)。
+//
+//  参数含义 (都是上游那次转换的设定, 不确定就现场试):
+//    YUV Matrix : Rec.709 / Rec.2020 NCL   (DV5 信号按 BT.2020 标, 默认 Rec.2020)
+//    YUV Range  : Full / Video             (上游是否做过 limited->full 展开)
+//    Transfer   : 仅 Coeff Model = CL 时用于线性化/回编; PQ 用于 HDR(PQ) 素材
+//
+//  注意: 非恒定亮度(NCL)的 YCbCr<->RGB 矩阵按定义作用在**非线性(伽马/PQ 编码)**
+//  的值上, 所以 NCL 是正确的理论位置; 若实测 CL(线性域) 才干净, 说明上游链路顺序
+//  不是按规范来的, 以上游实际顺序为准。
+//
+//  已知局限: CL 模式下回编用的是与亮度相同的传递函数, 色差通道会经过 PQ 曲线,
+//  这不是物理上有意义的做法, 只是"把矩阵搬到线性域"的载体; 因此 CL 模式只作为
+//  判别测试使用, 不要当成生产链路。
+// ============================================================================
+
+// clang-format off
+DEFINE_UI_PARAMS(dir,      Direction,    DCTLUI_COMBO_BOX,    0,   {UNDO, APPLY}, {Undo (RGB->YCbCr), Apply (YCbCr->RGB)})
+DEFINE_UI_PARAMS(model,    Coeff Model,  DCTLUI_COMBO_BOX,    0,   {NCL_ENC, CL_LIN}, {NCL (encoded), CL approx (linear-light)})
+DEFINE_UI_PARAMS(transfer, Transfer,     DCTLUI_COMBO_BOX,    0,   {IDENTITY, PQ, G24}, {Identity, PQ (ST2084), Gamma 2.4})
+DEFINE_UI_PARAMS(yuvmat,   YUV Matrix,   DCTLUI_COMBO_BOX,    1,   {REC709, REC2020}, {Rec.709, Rec.2020 NCL})
+DEFINE_UI_PARAMS(yuvrange, YUV Range,    DCTLUI_COMBO_BOX,    0,   {FULL, VIDEO}, {Full, Video})
+DEFINE_UI_PARAMS(clip,     Clip,         DCTLUI_COMBO_BOX,    0,   {NO_CLIP, CLIP}, {No, Yes})
+// clang-format on
+
+__DEVICE__ float3 get_color(int p_X, int p_Y, __TEXTURE__ p_TexR, __TEXTURE__ p_TexG, __TEXTURE__ p_TexB) {
+    float r = _tex2D(p_TexR, p_X, p_Y);
+    float g = _tex2D(p_TexG, p_X, p_Y);
+    float b = _tex2D(p_TexB, p_X, p_Y);
+    return make_float3(r, g, b);
+}
+
+// ---- SMPTE ST 2084 (PQ) ----
+// EOTF: 编码值 E'(0..1) -> 线性光 (0..1 对应 10000 nit)
+__DEVICE__ float pq_eotf(float e) {
+    float m1 = 0.1593017578125f, m2 = 78.84375f;
+    float c1 = 0.8359375f, c2 = 18.8515625f, c3 = 18.6875f;
+    float p   = _powf(_fmaxf(e, 0.0f), 1.0f / m2);
+    float num = _fmaxf(p - c1, 0.0f);
+    float den = c2 - c3 * p;
+    return _powf(num / den, 1.0f / m1);
+}
+
+// OETF: 线性光 -> 编码值 (输入取 max(0) 防负数/NaN, 色差通道会因此被裁到 0)
+__DEVICE__ float pq_oetf(float l) {
+    float m1 = 0.1593017578125f, m2 = 78.84375f;
+    float c1 = 0.8359375f, c2 = 18.8515625f, c3 = 18.6875f;
+    float q = _powf(_fmaxf(l, 0.0f), m1);
+    return _powf((c1 + c2 * q) / (1.0f + c3 * q), m2);
+}
+
+// 传递函数: tf = 0 Identity / 1 PQ / 2 Gamma 2.4
+__DEVICE__ float3 tf_decode(float3 c, int tf) {
+    if (tf == 1) return make_float3(pq_eotf(c.x), pq_eotf(c.y), pq_eotf(c.z));
+    if (tf == 2) return make_float3(_powf(_fmaxf(c.x, 0.0f), 2.4f),
+                                    _powf(_fmaxf(c.y, 0.0f), 2.4f),
+                                    _powf(_fmaxf(c.z, 0.0f), 2.4f));
+    return c;
+}
+
+__DEVICE__ float3 tf_encode(float3 c, int tf) {
+    if (tf == 1) return make_float3(pq_oetf(c.x), pq_oetf(c.y), pq_oetf(c.z));
+    if (tf == 2) return make_float3(_powf(_fmaxf(c.x, 0.0f), 1.0f / 2.4f),
+                                    _powf(_fmaxf(c.y, 0.0f), 1.0f / 2.4f),
+                                    _powf(_fmaxf(c.z, 0.0f), 1.0f / 2.4f));
+    return c;
+}
+
+// Kr / Kb 按所选标准; Kg = 1 - Kr - Kb
+__DEVICE__ void yuv_coeff(int mat, float *kr, float *kb, float *kg) {
+    *kr = (mat == 0) ? 0.2126f : 0.2627f;   // Rec.709 : Rec.2020
+    *kb = (mat == 0) ? 0.0722f : 0.0593f;
+    *kg = 1.0f - (*kr) - (*kb);
+}
+
+// RGB -> Y/Cb/Cr : 逆掉 YCbCr->RGB。色差以 0.5 为中性写回(还原 YCbCr 存储惯例)。
+//   rng=1 时把 full[0,1] 反向压回 10bit video 码值域, 对应上游做过 limited->full 展开
+__DEVICE__ float3 rgb_to_yuv(float3 c, int mat, int rng) {
+    float kr, kb, kg;
+    yuv_coeff(mat, &kr, &kb, &kg);
+
+    float y  = kr * c.x + kg * c.y + kb * c.z;
+    float cb = (c.z - y) / (2.0f * (1.0f - kb));
+    float cr = (c.x - y) / (2.0f * (1.0f - kr));
+
+    if (rng == 1) {
+        y  = y * (876.0f / 1023.0f) + (64.0f / 1023.0f);   // luma 64..940
+        cb = cb * (896.0f / 1023.0f);                      // chroma 以 512 为中心
+        cr = cr * (896.0f / 1023.0f);
+    }
+
+    return make_float3(y, cb + 0.5f, cr + 0.5f);
+}
+
+// Y/Cb/Cr -> RGB : 施加一次 YCbCr->RGB(色差按 0.5 为中性读入), 用于自检往返
+__DEVICE__ float3 yuv_to_rgb(float3 in, int mat, int rng) {
+    float kr, kb, kg;
+    yuv_coeff(mat, &kr, &kb, &kg);
+
+    float y  = in.x;
+    float cb = in.y - 0.5f;
+    float cr = in.z - 0.5f;
+
+    if (rng == 1) {                                        // video -> full 展开
+        y  = (y - 64.0f / 1023.0f) / (876.0f / 1023.0f);
+        cb = cb / (896.0f / 1023.0f);
+        cr = cr / (896.0f / 1023.0f);
+    }
+
+    float r = y + 2.0f * (1.0f - kr) * cr;
+    float b = y + 2.0f * (1.0f - kb) * cb;
+    float g = (y - kr * r - kb * b) / kg;
+    return make_float3(r, g, b);
+}
+
+__DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, __TEXTURE__ p_TexR, __TEXTURE__ p_TexG, __TEXTURE__ p_TexB) {
+    float3 in = get_color(p_X, p_Y, p_TexR, p_TexG, p_TexB);
+
+    // CL 模式: 先解到线性光, 矩阵在线性域做, 做完再编回原域
+    if (model == 1) {
+        in = tf_decode(in, transfer);
+    }
+
+    float3 out;
+    if (dir == 0) {
+        out = rgb_to_yuv(in, yuvmat, yuvrange);
+    } else {
+        out = yuv_to_rgb(in, yuvmat, yuvrange);
+    }
+
+    if (model == 1) {
+        out = tf_encode(out, transfer);
+    }
+
+    if (clip == 1) {
+        out.x = _fminf(1.0f, _fmaxf(0.0f, out.x));
+        out.y = _fminf(1.0f, _fmaxf(0.0f, out.y));
+        out.z = _fminf(1.0f, _fmaxf(0.0f, out.z));
+    }
+
+    return out;
+}

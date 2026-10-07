@@ -1,73 +1,70 @@
 // ============================================================================
-//  Waveform Picture  (波形图 · 藏在示波器里的画面)
+//  Waveform Picture  (波形图 · 藏在示波器里的画面)   —  Luma / RGB Parade 双模式
 //  by GHYC
 //
 //  原理 (How it works)
 //  -------------------
-//  波形监视器显示的是: 对图像每一列 x, 该列中亮度值 ≈ h 的像素个数
+//  波形监视器显示的是: 对图像每一列 x, 该列中信号值 ≈ h 的像素个数
 //  D(x, h) = count{ y : L(x, y) ≈ h }。
 //
 //  本 DCTL 让输出图像的列 x 满足:
-//      count{ 值 ≈ h_j }  ∝  原画面在 (x, 第 j 行) 的亮度
-//  于是波形监视器(Luma)上就会看到: 亮处点密、暗处点疏 —— 也就是原始画面本身,
-//  像一张点阵密度图, 而且方向是正的。
+//      count{ 值 ≈ h_j }  ∝  原画面在 (x, 第 j 行) 的亮度/通道值
+//  于是示波器上就看到原画面本身, 像一张点阵密度图, 方向是正的。
 //
-//  实现: 对每个输出像素, 沿本列采样 bins 个等距行位置得到亮度剖面 w[j],
+//  实现: 对每个输出像素, 沿本列采样 bins 个等距行位置得到剖面 w[j],
 //  取其累积分布 CDF; 把像素映射为 [0,1) 的采样位置 u, 反查逆 CDF 得到剖面
-//  位置 pos, 再换算成信号电平输出(灰度)。
+//  位置 pos, 再换算成信号电平输出。
 //
 //  ★ 稳定顺排 (Waterfall) ★
 //  u 取像素的行位置 u = (y + 0.5) / H (自上而下), 故同一列内输出电平随行严格
 //  单调 —— 示波器上每一电平对应一行, 呈现为清晰的"瀑布"条纹, 隐藏画面最锐利,
 //  且逐帧稳定、无噪点、无摩尔纹。不引入任何伪随机数。
 //
-//  观看方法: 在 Resolve 中把本节点挂到素材上, 打开示波器,
-//  选择 WAVEFORM + LUMA, 即可看到被"藏"起来的原画面。
+//  ★ 双模式 (Color Mode 下拉框) ★
+//    mode = 0 (Luma)      : 单通道加权亮度(Rec.709), 看示波器 WAVEFORM + LUMA
+//    mode = 1 (RGB Parade): R/G/B 三通道各自独立逆 CDF(共用同一 u), 看示波器
+//                           RGB PARADE(三块面板分别还原红/绿/蓝, 合成彩色原图)
 //
-//  注意: 直接看输出图像本身是灰度瀑布条纹, 请务必配合示波器观看。
+//  ★ 黑白转换 (Convert to B&W 下拉框) ★
+//    mono = 0 (Color): 保留彩色
+//    mono = 1 (B&W)  : 在最前端用 Rec.709 矩阵(L=0.2126R+0.7152G+0.0722B)把素材
+//                      转成灰度, 再走后续编码。Luma / RGB / Reveal 统一生效。
+//                      在 Luma 模式下无差异(Luma 本已是灰度), 在 RGB Parade 下会把
+//                      彩色瀑布与 Reveal 原图都变成黑白。
+//
+//  观看方法: 在 Resolve 中把本节点挂到素材上, 打开示波器:
+//    Luma 模式 -> WAVEFORM + LUMA
+//    RGB  模式 -> RGB PARADE (三块分离面板; 单个叠加图表无法合成彩色)
+//
+//  注意: 直接看输出图像本身是灰度/彩色瀑布条纹, 请务必配合示波器观看。
 // ============================================================================
 
 // clang-format off
-DEFINE_UI_PARAMS(bins,     Histogram Bins,       DCTLUI_SLIDER_INT, 128, 16, 256, 16)
+DEFINE_UI_PARAMS(mode,     Color Mode,           DCTLUI_COMBO_BOX, 0, {LUMA, RGB}, {Luma, RGB Parade})
+DEFINE_UI_PARAMS(mono,     Convert to B&W,       DCTLUI_COMBO_BOX, 0, {COLOR, MONO}, {Color, B&W})
+DEFINE_UI_PARAMS(bins,     Histogram Bins,       DCTLUI_SLIDER_INT, 128, 16, 1024, 16)
 DEFINE_UI_PARAMS(rowsub,   Row Samples,          DCTLUI_SLIDER_INT, 2, 1, 4, 1)
 DEFINE_UI_PARAMS(gamma,    Dot Contrast,         DCTLUI_SLIDER_FLOAT, 1.8, 0.2, 3.0, 0.05)
 DEFINE_UI_PARAMS(exposure, Exposure,             DCTLUI_SLIDER_FLOAT, 1.0, 0.1, 3.0, 0.05)
-DEFINE_UI_PARAMS(mix,      Reveal Original,      DCTLUI_SLIDER_FLOAT, 0.0, 0.0, 1.0, 0.01)
+DEFINE_UI_PARAMS(mix,      Reveal Original,      DCTLUI_SLIDER_FLOAT, 0.0, -1.0, 1.0, 0.01)
 // clang-format on
 
+// 对采样色做 Rec.709 黑白转换(mono=1)。所有采样(剖面 + Reveal 源)统一走这里,
+// 故 Luma 剖面 / RGB 三通道 / Reveal 显示的原图 三处一致生效。
 __DEVICE__ float3 get_color(int p_X, int p_Y, __TEXTURE__ p_TexR, __TEXTURE__ p_TexG, __TEXTURE__ p_TexB) {
     float r = _tex2D(p_TexR, p_X, p_Y);
     float g = _tex2D(p_TexG, p_X, p_Y);
     float b = _tex2D(p_TexB, p_X, p_Y);
+    if (mono) {
+        float luma = 0.2126f * r + 0.7152f * g + 0.0722f * b;  // Rec.709
+        r = luma; g = luma; b = luma;
+    }
     return make_float3(r, g, b);
 }
 
-__DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, __TEXTURE__ p_TexR, __TEXTURE__ p_TexG, __TEXTURE__ p_TexB) {
-    // ---- Pass 1: 采样本列亮度剖面 w[j], j=0 对应画面最上一行 ----
-    // 每个 bin 内做 rowsub 次盒式平均, 抑制细密横向条纹的混叠
-    float prof[256];  // 滑块上限 256, 与数组尺寸一致
-    float total = 0.0f;
-    float binh = (float)p_Height / (float)bins;
-    for (int j = 0; j < bins; ++j) {
-        float acc = 0.0f;
-        for (int s = 0; s < rowsub; ++s) {
-            int sy = (int)(((float)j + ((float)s + 0.5f) / (float)rowsub) * binh);
-            if (sy > p_Height - 1) sy = p_Height - 1;
-            if (sy < 0) sy = 0;
-            float3 c = get_color(p_X, sy, p_TexR, p_TexG, p_TexB);
-            acc += 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;  // Rec.709 luma
-        }
-        float w = _fminf(1.0f, _fmaxf(0.0f, acc / (float)rowsub) * exposure);
-        w = _powf(w, gamma);
-        prof[j] = w;
-        total += w;
-    }
-
-    // ---- 采样位置 u ∈ [0,1): 行位置(自上而下) => 顺排/瀑布 ----
-    // 同一列内严格单调, 示波器上每个电平对应一行, 隐藏画面最锐利且逐帧稳定。
-    float u = ((float)p_Y + 0.5f) / (float)p_Height;
-
-    // ---- Pass 2: 逆 CDF, 在剖面内取位置 pos ∈ [0,1) ----
+// ---- 逆 CDF: 在剖面内取位置 pos ∈ [0,1) ----
+// 整列剖面为零(全黑): 均匀铺满, 避免示波器上出现一根亮线
+__DEVICE__ float invcdf(const float* prof, float total, float u, int bins) {
     float pos;
     if (total > 1e-6f) {
         float target = u * total;
@@ -85,20 +82,95 @@ __DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, __TEXTU
             }
         }
     } else {
-        // 整列剖面为零(全黑): 均匀铺满, 避免示波器上出现一根亮线
         pos = u;
     }
+    return pos;
+}
 
-    // ---- 行位置 → 信号电平。电平 1.0(顶部)对应画面最上一行 => 画面正立 ----
-    float level = _fmaxf(0.0f, _fminf(1.0f, 1.0f - pos));
+__DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, __TEXTURE__ p_TexR, __TEXTURE__ p_TexG, __TEXTURE__ p_TexB) {
+    // ---- 采样位置 u ∈ [0,1): 行位置(自上而下) => 顺排/瀑布。两模式共用 ----
+    float u = ((float)p_Y + 0.5f) / (float)p_Height;
+    int bnh = (bins > p_Height) ? p_Height : bins;  // 自适应: bins 不超画面高度, 避免重复采样
+    float binh = (float)p_Height / (float)bnh;
 
-    // ---- 灰度输出; Reveal 渐变回原图(混合后示波器上画面逐渐融化) ----
-    float3 rgb = make_float3(level, level, level);
-    if (mix > 0.0f) {
+    float3 rgb;
+
+    if (mode == 0) {
+        // ================= Luma 单通道 =================
+        float prof[1024];  // 滑块上限 1024, 与数组尺寸一致
+        float total = 0.0f;
+        for (int j = 0; j < bnh; ++j) {
+            float acc = 0.0f;
+            for (int s = 0; s < rowsub; ++s) {
+                int sy = (int)(((float)j + ((float)s + 0.5f) / (float)rowsub) * binh);
+                if (sy > p_Height - 1) sy = p_Height - 1;
+                if (sy < 0) sy = 0;
+                float3 c = get_color(p_X, sy, p_TexR, p_TexG, p_TexB);
+                acc += 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;  // Rec.709 luma
+            }
+            float w = _fminf(1.0f, _fmaxf(0.0f, acc / (float)rowsub) * exposure);
+            w = _powf(w, gamma);
+            prof[j] = w;
+            total += w;
+        }
+        float pos = invcdf(prof, total, u, bnh);
+        float level = _fmaxf(0.0f, _fminf(1.0f, 1.0f - pos));
+        rgb = make_float3(level, level, level);
+    } else {
+        // ================= RGB 三通道 =================
+        // 一次纹理采样拆 R/G/B 累加, 三通道剖面共用同一 u, 保证 Parade 纵向对齐
+        float rprof[1024];  // 滑块上限 1024, 与数组尺寸一致
+        float gprof[1024];
+        float bprof[1024];
+        float rtot = 0.0f, gtot = 0.0f, btot = 0.0f;
+        for (int j = 0; j < bnh; ++j) {
+            float ra = 0.0f, ga = 0.0f, ba = 0.0f;
+            for (int s = 0; s < rowsub; ++s) {
+                int sy = (int)(((float)j + ((float)s + 0.5f) / (float)rowsub) * binh);
+                if (sy > p_Height - 1) sy = p_Height - 1;
+                if (sy < 0) sy = 0;
+                float3 c = get_color(p_X, sy, p_TexR, p_TexG, p_TexB);
+                ra += c.x;
+                ga += c.y;
+                ba += c.z;
+            }
+            float rw = _fminf(1.0f, _fmaxf(0.0f, ra / (float)rowsub) * exposure);
+            rw = _powf(rw, gamma);
+            rprof[j] = rw;
+            rtot += rw;
+            float gw = _fminf(1.0f, _fmaxf(0.0f, ga / (float)rowsub) * exposure);
+            gw = _powf(gw, gamma);
+            gprof[j] = gw;
+            gtot += gw;
+            float bw = _fminf(1.0f, _fmaxf(0.0f, ba / (float)rowsub) * exposure);
+            bw = _powf(bw, gamma);
+            bprof[j] = bw;
+            btot += bw;
+        }
+        float posR = invcdf(rprof, rtot, u, bnh);
+        float posG = invcdf(gprof, gtot, u, bnh);
+        float posB = invcdf(bprof, btot, u, bnh);
+        float levelR = _fmaxf(0.0f, _fminf(1.0f, 1.0f - posR));
+        float levelG = _fmaxf(0.0f, _fminf(1.0f, 1.0f - posG));
+        float levelB = _fmaxf(0.0f, _fminf(1.0f, 1.0f - posB));
+        rgb = make_float3(levelR, levelG, levelB);
+    }
+
+    // ---- Reveal Original: mix ∈ [-1,1] ----
+    // |mix| = 显现量(0 保持示波器编码图); 符号决定原图在示波器上正/倒。
+    // 注意: 不能翻转源行号/坐标(那样每列码值分布不变, 示波器看不出区别)。
+    // 要让示波器画面上下倒立, 必须对码值取补 (1 - v), 作用于示波器垂直轴。
+    float am = (mix < 0.0f) ? -mix : mix;
+    if (am > 0.0f) {
         float3 src = get_color(p_X, p_Y, p_TexR, p_TexG, p_TexB);
-        rgb.x = mix * src.x + (1.0f - mix) * rgb.x;
-        rgb.y = mix * src.y + (1.0f - mix) * rgb.y;
-        rgb.z = mix * src.z + (1.0f - mix) * rgb.z;
+        if (mix < 0.0f) {
+            src.x = 1.0f - src.x;
+            src.y = 1.0f - src.y;
+            src.z = 1.0f - src.z;
+        }
+        rgb.x = am * src.x + (1.0f - am) * rgb.x;
+        rgb.y = am * src.y + (1.0f - am) * rgb.y;
+        rgb.z = am * src.z + (1.0f - am) * rgb.z;
     }
 
     return rgb;

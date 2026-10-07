@@ -1,4 +1,4 @@
-# 生成的预览图（用 verify_waveform_picture.py 重新生成）
+# 生成的预览图（用 tools/verify_waveform_picture.py 重新生成）
 preview/
 # Python 字节码
 __pycache__/
